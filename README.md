@@ -1,6 +1,14 @@
 # ClosestPlane ESP32
 
-An Arduino-compatible sketch for the Freenove ESP32 4.0" display board (FNK0103) that connects to a dump1090 server and renders a simple radar status panel on the integrated TFT. The display shows the closest aircraft, distance, bearing, altitude, track, and connection status so you can keep an eye on nearby traffic at a glance.
+An Arduino-compatible sketch for the Freenove ESP32 4.0" display board (FNK0103) that connects to a dump1090 server and renders a touch-driven radar status panel on the integrated TFT. The sweeping radar visualisation lists the closest aircraft, highlights inbound traffic, and summarises flight details so you can keep an eye on nearby traffic at a glance.
+
+## Features
+
+- **Animated radar scope** with fading contacts, compass markings, WiFi signal indicator and configurable orientation.
+- **Inbound traffic detection** that flags aircraft inside a configurable alert ring or on a converging track, surfacing ETA when available.
+- **Detail panel** that caches and redraws only the rows that change, showing callsign, speed, distance, altitude, squawk and traffic counts.
+- **Touch controls** to cycle radar range, adjust the alert radius, rotate the radar orientation and select contacts, with settings persisted to EEPROM.
+- **Dump1090 integration** via `aircraft.json`, including smoothing so recently seen targets fade out rather than disappearing abruptly.
 
 ## Required Libraries
 
@@ -21,9 +29,15 @@ The sketch targets the Freenove FNK0103 kit where the ESP32, TFT backplane and t
 4. Compile and upload.
 
 ## Operation
-- The TFT lists the closest aircraft detected within the configured radius and highlights whether it is inbound.
-- Connection, WiFi strength and fetch timing are summarised near the bottom of the display.
-- Aircraft distance, bearing, altitude, track and estimated arrival (for inbound flights) refresh every five seconds while the ESP32 maintains a WiFi link to the dump1090 server.
+- The radar animates continuously; each sweep refresh highlights and caches detected aircraft so you can tap contacts to focus the info panel.
+- Tap the **Radar** button to cycle the display range (5 km → 300 km). Tap the **Alert** button to change the inbound alert radius (1 km → 10 km).
+- Tapping inside the radar face rotates the compass orientation in 90° steps—handy if you want north-up, track-up or any of the four quadrants.
+- Connection, WiFi strength, fetch timing and inbound counts are summarised near the bottom of the display.
+- Aircraft distance, bearing, altitude, track and estimated arrival (for inbound flights) refresh every five seconds while the ESP32 maintains a WiFi link to the dump1090 server. Alert/range selections and orientation are saved to EEPROM so they persist across reboots.
+
+### Touch Calibration
+
+The shipped defaults assume the calibration values used by the Freenove FNK0103. If your touches land slightly off, adjust the `TOUCH_RAW_*` defines at the top of `freenove.ino` to align the resistive panel in your build.
 
 ## Building in a Codex/Codespace Environment
 
