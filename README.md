@@ -126,3 +126,4 @@ echo "   arduino-cli compile --fqbn esp32:esp32:esp32 closestPlane.ino"
 
 The command completes successfully when the required libraries (Adafruit SH110X, SimpleRotary, etc.) are installed.
 
+
