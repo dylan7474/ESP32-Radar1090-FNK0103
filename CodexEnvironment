@@ -74,4 +74,4 @@ retry 5 5 arduino-cli lib install "ArduinoJson"
 retry 5 5 arduino-cli lib install "TFT_eSPI"
 
 echo "✅ Setup complete. Compile with:"
-echo "   arduino-cli compile --fqbn esp32:esp32:esp32 freenove.ino"
+echo "   arduino-cli compile --fqbn esp32:esp32:esp32 sketches/freenove"
