@@ -25,8 +25,13 @@ static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
 static const double INBOUND_ALERT_DISTANCE_KM = 5.0;
 static const int RADAR_RADIUS = 48;
 static const int RADAR_MARGIN = 12;
-static const double RADAR_MAX_RANGE_KM = 60.0;
+static const double RADAR_MAX_RANGE_KM = 25.0;
 static const int MAX_RADAR_CONTACTS = 40;
+static const unsigned long RADAR_SWEEP_PERIOD_MS = 4000;
+static const unsigned long RADAR_FADE_DURATION_MS = 4000;
+static const unsigned long RADAR_FRAME_INTERVAL_MS = 40;
+static const double RADAR_SWEEP_WIDTH_DEG = 3.0;
+static const uint16_t COLOR_RADAR_SWEEP = TFT_DARKGREEN;
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -49,6 +54,8 @@ bool dataConnectionOk = false;
 unsigned long lastFetchTime = 0;
 unsigned long lastWifiAttempt = 0;
 unsigned long lastSuccessfulFetch = 0;
+unsigned long radarSweepStart = 0;
+unsigned long lastRadarFrameTime = 0;
 
 // --- Function Prototypes ---
 void drawStaticLayout();
@@ -65,11 +72,14 @@ double deg2rad(double deg);
 String bearingToCardinal(double bearing);
 String formatBearingString(double bearing);
 String formatTimeAgo(unsigned long ms);
+uint16_t fadeColor(uint16_t color, float alpha);
+double angularDifference(double a, double b);
 
 void setup() {
   Serial.begin(115200);
   tft.begin();
   tft.setRotation(1);
+  radarSweepStart = millis();
   resetRadarContacts();
   drawStaticLayout();
 
@@ -97,7 +107,12 @@ void loop() {
     fetchAircraft();
   }
 
-  delay(50);
+  if (now - lastRadarFrameTime >= RADAR_FRAME_INTERVAL_MS) {
+    lastRadarFrameTime = now;
+    drawRadar();
+  }
+
+  delay(10);
 }
 
 struct RadarContact {
@@ -106,6 +121,7 @@ struct RadarContact {
   bool inbound;
   String flight;
   bool valid;
+  unsigned long lastHighlightTime;
 };
 
 RadarContact radarContacts[MAX_RADAR_CONTACTS];
@@ -116,6 +132,7 @@ void resetRadarContacts() {
   for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
     radarContacts[i].valid = false;
     radarContacts[i].flight = "";
+    radarContacts[i].lastHighlightTime = 0;
   }
 }
 
@@ -225,6 +242,8 @@ void updateDisplay() {
 }
 
 void drawRadar() {
+  unsigned long now = millis();
+  lastRadarFrameTime = now;
   int centerX = tft.width() - RADAR_MARGIN - RADAR_RADIUS;
   int centerY = tft.height() - RADAR_MARGIN - RADAR_RADIUS;
 
@@ -236,6 +255,14 @@ void drawRadar() {
   tft.drawFastVLine(centerX, centerY - RADAR_RADIUS, RADAR_RADIUS * 2, COLOR_RADAR_GRID);
 
   tft.fillCircle(centerX, centerY, 3, COLOR_RADAR_HOME);
+
+  unsigned long sweepElapsed = (now - radarSweepStart) % RADAR_SWEEP_PERIOD_MS;
+  double sweepProgress = (double)sweepElapsed / (double)RADAR_SWEEP_PERIOD_MS;
+  double sweepAngle = sweepProgress * 360.0;
+  double sweepRad = deg2rad(sweepAngle);
+  int sweepX = centerX + (int)round(sin(sweepRad) * (RADAR_RADIUS - 1));
+  int sweepY = centerY - (int)round(cos(sweepRad) * (RADAR_RADIUS - 1));
+  tft.drawLine(centerX, centerY, sweepX, sweepY, COLOR_RADAR_SWEEP);
 
   for (int i = 0; i < radarContactCount; ++i) {
     if (!radarContacts[i].valid) {
@@ -254,8 +281,24 @@ void drawRadar() {
     int contactX = centerX + (int)round(sin(angleRad) * radius);
     int contactY = centerY - (int)round(cos(angleRad) * radius);
 
-    uint16_t color = radarContacts[i].inbound ? COLOR_RADAR_INBOUND : COLOR_RADAR_CONTACT;
-    tft.fillCircle(contactX, contactY, 3, color);
+    double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
+    if (angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
+      radarContacts[i].lastHighlightTime = now;
+    }
+
+    if (radarContacts[i].lastHighlightTime == 0) {
+      continue;
+    }
+
+    unsigned long sinceHighlight = now - radarContacts[i].lastHighlightTime;
+    if (sinceHighlight > RADAR_FADE_DURATION_MS) {
+      continue;
+    }
+
+    float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
+    uint16_t baseColor = radarContacts[i].inbound ? COLOR_RADAR_INBOUND : COLOR_RADAR_CONTACT;
+    uint16_t fadedColor = fadeColor(baseColor, alpha);
+    tft.fillCircle(contactX, contactY, 3, fadedColor);
   }
 }
 
@@ -335,6 +378,10 @@ void fetchAircraft() {
           continue;
         }
 
+        if (distance > RADAR_MAX_RANGE_KM) {
+          continue;
+        }
+
         aircraftCount++;
 
         double bearingToHome = calculateBearing(USER_LAT, USER_LON, lat, lon);
@@ -384,6 +431,7 @@ void fetchAircraft() {
           contact.bearing = bearingToHome;
           contact.inbound = inbound;
           contact.valid = true;
+          contact.lastHighlightTime = 0;
           if (plane.containsKey("flight")) {
             const char *flightStr = plane["flight"].as<const char*>();
             contact.flight = flightStr ? String(flightStr) : String();
@@ -512,4 +560,28 @@ String formatTimeAgo(unsigned long ms) {
   char buffer[24];
   snprintf(buffer, sizeof(buffer), "%luh %02lum ago", hours, minutes);
   return String(buffer);
+}
+
+double angularDifference(double a, double b) {
+  double diff = fabs(fmod(a - b + 540.0, 360.0) - 180.0);
+  return diff;
+}
+
+uint16_t fadeColor(uint16_t color, float alpha) {
+  if (alpha <= 0.0f) {
+    return COLOR_BACKGROUND;
+  }
+  if (alpha >= 1.0f) {
+    return color;
+  }
+
+  uint8_t r = (color >> 11) & 0x1F;
+  uint8_t g = (color >> 5) & 0x3F;
+  uint8_t b = color & 0x1F;
+
+  r = (uint8_t)round(r * alpha);
+  g = (uint8_t)round(g * alpha);
+  b = (uint8_t)round(b * alpha);
+
+  return (uint16_t)((r << 11) | (g << 5) | b);
 }
