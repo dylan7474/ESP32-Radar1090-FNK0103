@@ -78,6 +78,8 @@ static const int ALERT_RANGE_OPTION_COUNT = sizeof(ALERT_RANGE_OPTIONS_KM) / siz
 static const double DEFAULT_RADAR_RANGE_KM = 25.0;
 static const double DEFAULT_ALERT_RANGE_KM = 5.0;
 
+static const int COMPASS_LABEL_COUNT = 4;
+
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite radarSprite = TFT_eSprite(&tft);
 
@@ -124,6 +126,8 @@ int infoAreaWidth = 0;
 int infoAreaHeight = 0;
 int buttonAreaY = 0;
 
+uint8_t displayRotation = 0;
+
 enum ButtonType {
   BUTTON_RADAR_RANGE,
   BUTTON_ALERT_RANGE,
@@ -165,6 +169,17 @@ struct InfoPanelCache {
 };
 
 InfoPanelCache infoPanelCache = {};
+
+struct CompassLabelBounds {
+  const char *label;
+  int x;
+  int y;
+  int w;
+  int h;
+};
+
+CompassLabelBounds compassLabelBounds[COMPASS_LABEL_COUNT];
+bool compassLabelBoundsValid = false;
 
 void drawButtons();
 void resetRadarContacts();
@@ -271,11 +286,14 @@ void drawButtons();
 void drawButton(int index);
 bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
+bool touchInCompassLabel(const char *label, int touchX, int touchY);
+void rotateRadarOrientation();
 
 template <typename GFX>
 void drawCompassLabels(GFX &gfx, int centerX, int centerY, int radius) {
   static const char *const labels[] = {"N", "E", "S", "W"};
   static const double angles[] = {0.0, 90.0, 180.0, 270.0};
+  compassLabelBoundsValid = false;
   if (radius <= 0) {
     return;
   }
@@ -285,20 +303,36 @@ void drawCompassLabels(GFX &gfx, int centerX, int centerY, int radius) {
   gfx.setTextSize(COMPASS_TEXT_SIZE);
   gfx.setTextColor(COLOR_RADAR_GRID, COLOR_BACKGROUND);
 
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; i < COMPASS_LABEL_COUNT; ++i) {
     double angleRad = deg2rad(angles[i]);
     int labelX = centerX + (int)round(sin(angleRad) * labelRadius);
     int labelY = centerY - (int)round(cos(angleRad) * labelRadius);
     gfx.drawString(labels[i], labelX, labelY);
+
+    int textWidth = gfx.textWidth(labels[i]);
+    if (textWidth <= 0) {
+      textWidth = COMPASS_TEXT_SIZE * 6;
+    }
+    int textHeight = COMPASS_TEXT_SIZE * 8;
+    int halfWidth = max(textWidth / 2, 1);
+    int halfHeight = max(textHeight / 2, 1);
+
+    compassLabelBounds[i].label = labels[i];
+    compassLabelBounds[i].x = labelX - halfWidth;
+    compassLabelBounds[i].y = labelY - halfHeight;
+    compassLabelBounds[i].w = max(textWidth, 1);
+    compassLabelBounds[i].h = max(textHeight, 1);
   }
 
+  compassLabelBoundsValid = true;
   gfx.setTextSize(1);
 }
 
 void setup() {
   Serial.begin(115200);
   tft.begin();
-  tft.setRotation(0);
+  displayRotation = 0;
+  tft.setRotation(displayRotation);
   initializeRangeIndices();
   radarSweepStart = millis();
   resetRadarContacts();
@@ -703,6 +737,7 @@ bool ensureActiveContactFresh(unsigned long now) {
 void drawRadar() {
   unsigned long now = millis();
   lastRadarFrameTime = now;
+  compassLabelBoundsValid = false;
   if (radarRadius <= 0) {
     return;
   }
@@ -1401,6 +1436,34 @@ bool readTouchPoint(int &screenX, int &screenY) {
   return true;
 }
 
+bool touchInCompassLabel(const char *label, int touchX, int touchY) {
+  if (!compassLabelBoundsValid || label == nullptr) {
+    return false;
+  }
+
+  for (int i = 0; i < COMPASS_LABEL_COUNT; ++i) {
+    const CompassLabelBounds &bounds = compassLabelBounds[i];
+    if (bounds.label == nullptr || strcmp(bounds.label, label) != 0) {
+      continue;
+    }
+
+    int right = bounds.x + bounds.w - 1;
+    int bottom = bounds.y + bounds.h - 1;
+    if (touchX >= bounds.x && touchX <= right && touchY >= bounds.y && touchY <= bottom) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void rotateRadarOrientation() {
+  displayRotation = (displayRotation + 1) % 4;
+  tft.setRotation(displayRotation);
+  compassLabelBoundsValid = false;
+  drawStaticLayout();
+}
+
 void handleTouch() {
   int touchX = 0;
   int touchY = 0;
@@ -1414,12 +1477,19 @@ void handleTouch() {
   }
   lastTouchTime = now;
 
+  bool handled = false;
   for (int i = 0; i < BUTTON_COUNT; ++i) {
     TouchButton &btn = buttons[i];
     if (touchX >= btn.x && touchX <= btn.x + btn.w && touchY >= btn.y && touchY <= btn.y + btn.h) {
       handleRangeButton(btn.type);
+      handled = true;
       break;
     }
+  }
+
+  if (!handled && touchInCompassLabel("N", touchX, touchY)) {
+    rotateRadarOrientation();
+    return;
   }
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
