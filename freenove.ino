@@ -39,6 +39,7 @@ static const int INFO_TABLE_HEADER_HEIGHT = 48;
 static const int INFO_TABLE_PADDING = 8;
 static const int COMPASS_LABEL_OFFSET = 16;
 static const int COMPASS_TEXT_SIZE = 2;
+static const float AIRCRAFT_ICON_SIZE = 6.0f;
 
 static const int BUTTON_COUNT = 2;
 static const int BUTTON_HEIGHT = 48;
@@ -288,6 +289,46 @@ void drawButton(int index);
 bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 void rotateRadarOrientation();
+
+template <typename GFX>
+void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, float size, uint16_t color) {
+  if (size <= 0.0f || isnan(headingDeg)) {
+    return;
+  }
+
+  double normalizedHeading = fmod(headingDeg, 360.0);
+  if (normalizedHeading < 0.0) {
+    normalizedHeading += 360.0;
+  }
+  double headingRad = deg2rad(normalizedHeading);
+  double sinHeading = sin(headingRad);
+  double cosHeading = cos(headingRad);
+
+  struct IconPoint {
+    int x;
+    int y;
+  };
+
+  auto transformPoint = [&](float localX, float localY) -> IconPoint {
+    double rotatedX = localX * cosHeading - localY * sinHeading;
+    double rotatedY = localX * sinHeading + localY * cosHeading;
+    IconPoint p;
+    p.x = centerX + (int)round(rotatedX);
+    p.y = centerY + (int)round(rotatedY);
+    return p;
+  };
+
+  IconPoint nose = transformPoint(0.0f, -size);
+  IconPoint leftWing = transformPoint(-size * 0.6f, size * 0.6f);
+  IconPoint rightWing = transformPoint(size * 0.6f, size * 0.6f);
+  IconPoint tail = transformPoint(0.0f, size);
+  IconPoint tailLeft = transformPoint(-size * 0.25f, size * 0.2f);
+  IconPoint tailRight = transformPoint(size * 0.25f, size * 0.2f);
+
+  gfx.fillTriangle(nose.x, nose.y, leftWing.x, leftWing.y, rightWing.x, rightWing.y, color);
+  gfx.fillTriangle(leftWing.x, leftWing.y, tail.x, tail.y, rightWing.x, rightWing.y, color);
+  gfx.drawLine(tailLeft.x, tailLeft.y, tailRight.x, tailRight.y, color);
+}
 
 template <typename GFX>
 void drawCompassLabels(GFX &gfx, int centerX, int centerY, int radius, double rotationOffsetDeg) {
@@ -838,7 +879,11 @@ void drawRadar() {
         baseColor = COLOR_RADAR_CONTACT;
       }
       uint16_t fadedColor = fadeColor(baseColor, alpha);
-      radarSprite.fillCircle(contactX, contactY, 3, fadedColor);
+      double headingDeg = radarContacts[i].track;
+      if (isnan(headingDeg)) {
+        headingDeg = radarContacts[i].bearing;
+      }
+      drawAircraftIcon(radarSprite, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
     }
 
     int spriteX = radarCenterX - radarRadius;
@@ -909,7 +954,11 @@ void drawRadar() {
         baseColor = COLOR_RADAR_CONTACT;
       }
       uint16_t fadedColor = fadeColor(baseColor, alpha);
-      tft.fillCircle(contactX, contactY, 3, fadedColor);
+      double headingDeg = radarContacts[i].track;
+      if (isnan(headingDeg)) {
+        headingDeg = radarContacts[i].bearing;
+      }
+      drawAircraftIcon(tft, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
     }
 
   }
