@@ -38,6 +38,28 @@ static const int BUTTON_COUNT = 2;
 static const int BUTTON_HEIGHT = 48;
 static const int BUTTON_SPACING = 12;
 static const unsigned long TOUCH_DEBOUNCE_MS = 250;
+// Resistive touch calibration bounds; adjust if on-screen touch points do not align.
+#ifndef TOUCH_RAW_MIN_X
+#define TOUCH_RAW_MIN_X 200
+#endif
+#ifndef TOUCH_RAW_MAX_X
+#define TOUCH_RAW_MAX_X 3900
+#endif
+#ifndef TOUCH_RAW_MIN_Y
+#define TOUCH_RAW_MIN_Y 200
+#endif
+#ifndef TOUCH_RAW_MAX_Y
+#define TOUCH_RAW_MAX_Y 3900
+#endif
+#ifndef TOUCH_SWAP_XY
+#define TOUCH_SWAP_XY 0
+#endif
+#ifndef TOUCH_INVERT_X
+#define TOUCH_INVERT_X 0
+#endif
+#ifndef TOUCH_INVERT_Y
+#define TOUCH_INVERT_Y 0
+#endif
 static const int WIFI_ICON_BARS = 4;
 static const int WIFI_ICON_BAR_WIDTH = 5;
 static const int WIFI_ICON_BAR_SPACING = 3;
@@ -110,6 +132,7 @@ void drawWifiIcon(int x, int y, int barsActive, bool connected);
 void configureButtons();
 void drawButtons();
 void drawButton(int index);
+bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 
 void setup() {
@@ -675,14 +698,59 @@ void drawButton(int index) {
 
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(COLOR_TEXT, fillColor);
-  String label = String(btn.name) + ": " + (btn.state ? "ON" : "OFF");
+  tft.setTextSize(2);
+  const char *label = btn.state ? "ON" : "OFF";
   tft.drawString(label, btn.x + btn.w / 2, btn.y + btn.h / 2);
 }
 
+bool readTouchPoint(int &screenX, int &screenY) {
+  uint16_t rawX = 0;
+  uint16_t rawY = 0;
+  if (!tft.getTouchRaw(&rawX, &rawY)) {
+    return false;
+  }
+
+  long mappedX = rawX;
+  long mappedY = rawY;
+
+  if (TOUCH_RAW_MAX_X > TOUCH_RAW_MIN_X) {
+    mappedX = map(rawX, TOUCH_RAW_MIN_X, TOUCH_RAW_MAX_X, 0, (long)tft.width() - 1);
+  } else {
+    mappedX = rawX % tft.width();
+  }
+
+  if (TOUCH_RAW_MAX_Y > TOUCH_RAW_MIN_Y) {
+    mappedY = map(rawY, TOUCH_RAW_MIN_Y, TOUCH_RAW_MAX_Y, 0, (long)tft.height() - 1);
+  } else {
+    mappedY = rawY % tft.height();
+  }
+
+  mappedX = constrain(mappedX, 0, (long)tft.width() - 1);
+  mappedY = constrain(mappedY, 0, (long)tft.height() - 1);
+
+#if TOUCH_SWAP_XY
+  long swap = mappedX;
+  mappedX = mappedY;
+  mappedY = swap;
+#endif
+
+#if TOUCH_INVERT_X
+  mappedX = (long)tft.width() - 1 - mappedX;
+#endif
+
+#if TOUCH_INVERT_Y
+  mappedY = (long)tft.height() - 1 - mappedY;
+#endif
+
+  screenX = (int)mappedX;
+  screenY = (int)mappedY;
+  return true;
+}
+
 void handleTouch() {
-  uint16_t tx = 0;
-  uint16_t ty = 0;
-  if (!tft.getTouch(&tx, &ty)) {
+  int touchX = 0;
+  int touchY = 0;
+  if (!readTouchPoint(touchX, touchY)) {
     return;
   }
 
@@ -694,9 +762,10 @@ void handleTouch() {
 
   for (int i = 0; i < BUTTON_COUNT; ++i) {
     TouchButton &btn = buttons[i];
-    if (tx >= btn.x && tx <= btn.x + btn.w && ty >= btn.y && ty <= btn.y + btn.h) {
+    if (touchX >= btn.x && touchX <= btn.x + btn.w && touchY >= btn.y && touchY <= btn.y + btn.h) {
       btn.state = !btn.state;
       drawButton(i);
+      break;
     }
   }
   tft.setTextDatum(TL_DATUM);
