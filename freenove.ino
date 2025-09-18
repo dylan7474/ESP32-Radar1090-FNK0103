@@ -184,52 +184,30 @@ void updateDisplay() {
     }
     drawInfoLine(lineIndex++, header);
 
-    String distanceLine = String(closestAircraft.distanceKm, 1) + " km  " + formatBearingString(closestAircraft.bearing);
-    drawInfoLine(lineIndex++, distanceLine);
+    drawInfoLine(lineIndex++, "Distance: " + String(closestAircraft.distanceKm, 1) + " km");
 
-    String detailLine;
     if (closestAircraft.altitude >= 0) {
-      detailLine += String(closestAircraft.altitude) + " ft";
+      drawInfoLine(lineIndex++, "Altitude: " + String(closestAircraft.altitude) + " ft");
     }
+
     if (!isnan(closestAircraft.groundSpeed) && closestAircraft.groundSpeed >= 0) {
-      if (detailLine.length()) {
-        detailLine += "  ";
-      }
-      detailLine += String(closestAircraft.groundSpeed, 0) + " kt";
+      drawInfoLine(lineIndex++, "Speed: " + String(closestAircraft.groundSpeed, 0) + " kt");
     }
-    if (closestAircraft.inbound) {
-      if (!isnan(closestAircraft.minutesToClosest) && closestAircraft.minutesToClosest >= 0) {
-        if (detailLine.length()) {
-          detailLine += "  ";
-        }
-        detailLine += String(closestAircraft.minutesToClosest, 1) + " min";
-      }
-    } else if (!isnan(closestAircraft.track)) {
-      if (detailLine.length()) {
-        detailLine += "  ";
-      }
-      detailLine += formatBearingString(closestAircraft.track);
+
+    if (closestAircraft.inbound && !isnan(closestAircraft.minutesToClosest) && closestAircraft.minutesToClosest >= 0) {
+      drawInfoLine(lineIndex++, "ETA: " + String(closestAircraft.minutesToClosest, 1) + " min");
     }
-    drawInfoLine(lineIndex++, detailLine);
   } else {
     drawInfoLine(lineIndex++, "No aircraft in range");
-    drawInfoLine(lineIndex++, "");
-    drawInfoLine(lineIndex++, "");
   }
 
-  String updateLine = "Updated: ";
-  if (lastSuccessfulFetch > 0) {
-    updateLine += formatTimeAgo(millis() - lastSuccessfulFetch);
-  } else {
-    updateLine += "--";
-  }
   if (aircraftCount > 0) {
-    updateLine += "  Traffic " + String(aircraftCount);
+    String trafficLine = "Traffic: " + String(aircraftCount);
     if (inboundAircraftCount > 0) {
-      updateLine += " (" + String(inboundAircraftCount) + " in)";
+      trafficLine += " (" + String(inboundAircraftCount) + " in)";
     }
+    drawInfoLine(lineIndex++, trafficLine);
   }
-  drawInfoLine(lineIndex++, updateLine);
 
   tft.setTextPadding(0);
   drawRadar();
