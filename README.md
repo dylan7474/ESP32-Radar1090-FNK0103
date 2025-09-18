@@ -1,6 +1,6 @@
 # ClosestPlane ESP32
 
-An Arduino-compatible sketch for ESP32 boards that connects to a dump1090 server and renders a sweeping radar view on a 128×64 SH1106 OLED. Aircraft within the selected range appear as blips and a short tone plays as the sweep crosses each target. Volume, radar range and sweep speed are controlled with two rotary encoders and saved to EEPROM.
+An Arduino-compatible sketch for ESP32 boards that connects to a dump1090 server and renders a sweeping radar view on a 4 inch Freenove EPS32 Display (FNK0103). Aircraft within the selected range appear as blips and a short tone plays as the sweep crosses each target. Volume, radar range and sweep speed are controlled with two rotary encoders and saved to EEPROM.
 
 ## Required Libraries
 
@@ -125,3 +125,4 @@ echo "   arduino-cli compile --fqbn esp32:esp32:esp32 closestPlane.ino"
 ```
 
 The command completes successfully when the required libraries (Adafruit SH110X, SimpleRotary, etc.) are installed.
+
