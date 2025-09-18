@@ -33,6 +33,7 @@ static const double RADAR_SWEEP_WIDTH_DEG = 3.0;
 static const uint16_t COLOR_RADAR_SWEEP = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_ACTIVE = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_INACTIVE = TFT_DARKGREY;
+static const int MAX_INFO_LINES = 12;
 
 static const int BUTTON_COUNT = 2;
 static const int BUTTON_HEIGHT = 48;
@@ -119,6 +120,9 @@ struct TouchButton {
 
 TouchButton buttons[BUTTON_COUNT];
 unsigned long lastTouchTime = 0;
+
+String lastInfoLines[MAX_INFO_LINES];
+int lastInfoLineCount = -1;
 
 // --- Function Prototypes ---
 void drawStaticLayout();
@@ -265,6 +269,7 @@ void drawStaticLayout() {
 
   lastWifiBars = -1;
   lastWifiConnectedState = false;
+  lastInfoLineCount = -1;
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
@@ -286,12 +291,21 @@ void drawInfoLine(int index, const String &text) {
 void updateDisplay() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
-  tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, infoAreaHeight, COLOR_BACKGROUND);
   tft.setTextSize(1);
 
-  int lineIndex = 0;
-  int availableTextHeight = max(buttonAreaY - infoAreaY - INFO_TOP_MARGIN, 0);
+  int textAreaHeight = max(buttonAreaY - infoAreaY, 0);
+  int availableTextHeight = max(textAreaHeight - INFO_TOP_MARGIN, 0);
   int maxLines = INFO_LINE_HEIGHT > 0 ? availableTextHeight / INFO_LINE_HEIGHT : 0;
+  int lineCapacity = min(maxLines, MAX_INFO_LINES);
+
+  String infoLines[MAX_INFO_LINES];
+  int lineIndex = 0;
+  auto appendLine = [&](const String &line) {
+    if (lineIndex < lineCapacity) {
+      infoLines[lineIndex++] = line.length() ? line : String(" ");
+    }
+  };
+
   if (closestAircraft.valid) {
     String flight = closestAircraft.flight.length() ? closestAircraft.flight : String("(unknown)");
     flight.trim();
@@ -299,35 +313,23 @@ void updateDisplay() {
     if (closestAircraft.inbound) {
       header += "  INBOUND";
     }
-    if (lineIndex < maxLines) {
-      drawInfoLine(lineIndex++, header);
-    }
+    appendLine(header);
 
-    if (lineIndex < maxLines) {
-      drawInfoLine(lineIndex++, "Distance: " + String(closestAircraft.distanceKm, 1) + " km");
-    }
+    appendLine("Distance: " + String(closestAircraft.distanceKm, 1) + " km");
 
     if (closestAircraft.altitude >= 0) {
-      if (lineIndex < maxLines) {
-        drawInfoLine(lineIndex++, "Altitude: " + String(closestAircraft.altitude) + " ft");
-      }
+      appendLine("Altitude: " + String(closestAircraft.altitude) + " ft");
     }
 
     if (!isnan(closestAircraft.groundSpeed) && closestAircraft.groundSpeed >= 0) {
-      if (lineIndex < maxLines) {
-        drawInfoLine(lineIndex++, "Speed: " + String(closestAircraft.groundSpeed, 0) + " kt");
-      }
+      appendLine("Speed: " + String(closestAircraft.groundSpeed, 0) + " kt");
     }
 
     if (closestAircraft.inbound && !isnan(closestAircraft.minutesToClosest) && closestAircraft.minutesToClosest >= 0) {
-      if (lineIndex < maxLines) {
-        drawInfoLine(lineIndex++, "ETA: " + String(closestAircraft.minutesToClosest, 1) + " min");
-      }
+      appendLine("ETA: " + String(closestAircraft.minutesToClosest, 1) + " min");
     }
   } else {
-    if (lineIndex < maxLines) {
-      drawInfoLine(lineIndex++, "No aircraft in range");
-    }
+    appendLine("No aircraft in range");
   }
 
   if (aircraftCount > 0) {
@@ -335,15 +337,39 @@ void updateDisplay() {
     if (inboundAircraftCount > 0) {
       trafficLine += " (" + String(inboundAircraftCount) + " in)";
     }
-    if (lineIndex < maxLines) {
-      drawInfoLine(lineIndex++, trafficLine);
+    appendLine(trafficLine);
+  }
+
+  bool infoChanged = (lineIndex != lastInfoLineCount);
+  if (!infoChanged) {
+    for (int i = 0; i < lineIndex; ++i) {
+      if (infoLines[i] != lastInfoLines[i]) {
+        infoChanged = true;
+        break;
+      }
     }
   }
 
+  if (infoChanged) {
+    if (textAreaHeight > 0 && infoAreaWidth > 0) {
+      tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_BACKGROUND);
+    }
+
+    int padding = max(infoAreaWidth - 8, 0);
+    tft.setTextPadding(padding);
+    for (int i = 0; i < lineIndex; ++i) {
+      drawInfoLine(i, infoLines[i]);
+      lastInfoLines[i] = infoLines[i];
+    }
+    for (int i = lineIndex; i < MAX_INFO_LINES; ++i) {
+      lastInfoLines[i] = "";
+    }
+    lastInfoLineCount = lineIndex;
+  }
+
   tft.setTextPadding(0);
+
   drawRadar();
-  drawButtons();
-  drawStatusBar();
 }
 
 void drawRadar() {
