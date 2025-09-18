@@ -22,9 +22,7 @@ static const int INFO_LINE_HEIGHT = 20;
 static const unsigned long REFRESH_INTERVAL_MS = 5000;
 static const unsigned long WIFI_RETRY_INTERVAL_MS = 15000;
 static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
-static const double INBOUND_ALERT_DISTANCE_KM = 5.0;
 static const int RADAR_MARGIN = 12;
-static const double RADAR_MAX_RANGE_KM = 25.0;
 static const int MAX_RADAR_CONTACTS = 40;
 static const unsigned long RADAR_SWEEP_PERIOD_MS = 4000;
 static const unsigned long RADAR_FADE_DURATION_MS = 4000;
@@ -66,6 +64,13 @@ static const int WIFI_ICON_BAR_WIDTH = 5;
 static const int WIFI_ICON_BAR_SPACING = 3;
 static const int WIFI_ICON_HEIGHT = 20;
 
+static const double RADAR_RANGE_OPTIONS_KM[] = {5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 300.0};
+static const int RADAR_RANGE_OPTION_COUNT = sizeof(RADAR_RANGE_OPTIONS_KM) / sizeof(RADAR_RANGE_OPTIONS_KM[0]);
+static const double ALERT_RANGE_OPTIONS_KM[] = {1.0, 3.0, 5.0, 10.0};
+static const int ALERT_RANGE_OPTION_COUNT = sizeof(ALERT_RANGE_OPTIONS_KM) / sizeof(ALERT_RANGE_OPTIONS_KM[0]);
+static const double DEFAULT_RADAR_RANGE_KM = 25.0;
+static const double DEFAULT_ALERT_RANGE_KM = 5.0;
+
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite radarSprite = TFT_eSprite(&tft);
 
@@ -95,6 +100,9 @@ unsigned long lastSuccessfulFetch = 0;
 unsigned long radarSweepStart = 0;
 unsigned long lastRadarFrameTime = 0;
 
+int radarRangeIndex = 0;
+int alertRangeIndex = 0;
+
 int lastWifiBars = -1;
 bool lastWifiConnectedState = false;
 
@@ -109,6 +117,12 @@ int infoAreaWidth = 0;
 int infoAreaHeight = 0;
 int buttonAreaY = 0;
 
+enum ButtonType {
+  BUTTON_RADAR_RANGE,
+  BUTTON_ALERT_RANGE,
+  BUTTON_UNKNOWN
+};
+
 struct TouchButton {
   int x;
   int y;
@@ -116,6 +130,7 @@ struct TouchButton {
   int h;
   bool state;
   const char *name;
+  ButtonType type;
 };
 
 TouchButton buttons[BUTTON_COUNT];
@@ -123,6 +138,83 @@ unsigned long lastTouchTime = 0;
 
 String lastInfoLines[MAX_INFO_LINES];
 int lastInfoLineCount = -1;
+
+void drawButtons();
+void resetRadarContacts();
+void updateDisplay();
+void fetchAircraft();
+void initializeRangeIndices();
+double currentRadarRangeKm();
+double currentAlertRangeKm();
+void cycleRadarRange();
+void cycleAlertRange();
+void handleRangeButton(ButtonType type);
+
+void initializeRangeIndices() {
+  radarRangeIndex = 0;
+  alertRangeIndex = 0;
+
+  for (int i = 0; i < RADAR_RANGE_OPTION_COUNT; ++i) {
+    if (fabs(RADAR_RANGE_OPTIONS_KM[i] - DEFAULT_RADAR_RANGE_KM) < 0.01) {
+      radarRangeIndex = i;
+      break;
+    }
+  }
+
+  for (int i = 0; i < ALERT_RANGE_OPTION_COUNT; ++i) {
+    if (fabs(ALERT_RANGE_OPTIONS_KM[i] - DEFAULT_ALERT_RANGE_KM) < 0.01) {
+      alertRangeIndex = i;
+      break;
+    }
+  }
+}
+
+double currentRadarRangeKm() {
+  if (radarRangeIndex < 0 || radarRangeIndex >= RADAR_RANGE_OPTION_COUNT) {
+    return RADAR_RANGE_OPTIONS_KM[0];
+  }
+  return RADAR_RANGE_OPTIONS_KM[radarRangeIndex];
+}
+
+double currentAlertRangeKm() {
+  if (alertRangeIndex < 0 || alertRangeIndex >= ALERT_RANGE_OPTION_COUNT) {
+    return ALERT_RANGE_OPTIONS_KM[0];
+  }
+  return ALERT_RANGE_OPTIONS_KM[alertRangeIndex];
+}
+
+void cycleRadarRange() {
+  if (RADAR_RANGE_OPTION_COUNT <= 0) {
+    return;
+  }
+  radarRangeIndex = (radarRangeIndex + 1) % RADAR_RANGE_OPTION_COUNT;
+}
+
+void cycleAlertRange() {
+  if (ALERT_RANGE_OPTION_COUNT <= 0) {
+    return;
+  }
+  alertRangeIndex = (alertRangeIndex + 1) % ALERT_RANGE_OPTION_COUNT;
+}
+
+void handleRangeButton(ButtonType type) {
+  if (type == BUTTON_RADAR_RANGE) {
+    cycleRadarRange();
+  } else if (type == BUTTON_ALERT_RANGE) {
+    cycleAlertRange();
+  } else {
+    return;
+  }
+
+  drawButtons();
+  resetRadarContacts();
+  closestAircraft.valid = false;
+  aircraftCount = 0;
+  inboundAircraftCount = 0;
+  updateDisplay();
+  fetchAircraft();
+  lastFetchTime = millis();
+}
 
 // --- Function Prototypes ---
 void drawStaticLayout();
@@ -153,6 +245,7 @@ void setup() {
   Serial.begin(115200);
   tft.begin();
   tft.setRotation(0);
+  initializeRangeIndices();
   radarSweepStart = millis();
   resetRadarContacts();
   drawStaticLayout();
@@ -209,6 +302,9 @@ void resetRadarContacts() {
     radarContacts[i].valid = false;
     radarContacts[i].flight = "";
     radarContacts[i].lastHighlightTime = 0;
+    radarContacts[i].inbound = false;
+    radarContacts[i].distanceKm = 0.0;
+    radarContacts[i].bearing = 0.0;
   }
 }
 
@@ -311,7 +407,7 @@ void updateDisplay() {
     flight.trim();
     String header = "Flight " + flight;
     if (closestAircraft.inbound) {
-      header += "  INBOUND";
+      header += "  ALERT";
     }
     appendLine(header);
 
@@ -339,6 +435,9 @@ void updateDisplay() {
     }
     appendLine(trafficLine);
   }
+
+  appendLine("Radar range: " + String(currentRadarRangeKm(), 0) + " km");
+  appendLine("Alert range: " + String(currentAlertRangeKm(), 0) + " km");
 
   bool infoChanged = (lineIndex != lastInfoLineCount);
   if (!infoChanged) {
@@ -379,10 +478,16 @@ void drawRadar() {
     return;
   }
 
+  double radarRangeKm = currentRadarRangeKm();
+  if (radarRangeKm <= 0.0) {
+    return;
+  }
+
   unsigned long sweepElapsed = (now - radarSweepStart) % RADAR_SWEEP_PERIOD_MS;
   double sweepProgress = (double)sweepElapsed / (double)RADAR_SWEEP_PERIOD_MS;
   double sweepAngle = sweepProgress * 360.0;
   double sweepRad = deg2rad(sweepAngle);
+  bool flashOn = ((now / 400) % 2) == 0;
 
   if (radarSpriteActive) {
     radarSprite.fillSprite(COLOR_BACKGROUND);
@@ -403,7 +508,7 @@ void drawRadar() {
         continue;
       }
 
-      double normalized = radarContacts[i].distanceKm / RADAR_MAX_RANGE_KM;
+      double normalized = radarContacts[i].distanceKm / radarRangeKm;
       if (normalized > 1.0) {
         normalized = 1.0;
       } else if (normalized < 0.0 || isnan(normalized)) {
@@ -430,7 +535,9 @@ void drawRadar() {
       }
 
       float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
-      uint16_t baseColor = radarContacts[i].inbound ? COLOR_RADAR_INBOUND : COLOR_RADAR_CONTACT;
+      uint16_t baseColor = radarContacts[i].inbound
+                              ? (flashOn ? COLOR_RADAR_INBOUND : COLOR_BACKGROUND)
+                              : COLOR_RADAR_CONTACT;
       uint16_t fadedColor = fadeColor(baseColor, alpha);
       radarSprite.fillCircle(contactX, contactY, 3, fadedColor);
     }
@@ -465,7 +572,7 @@ void drawRadar() {
         continue;
       }
 
-      double normalized = radarContacts[i].distanceKm / RADAR_MAX_RANGE_KM;
+      double normalized = radarContacts[i].distanceKm / radarRangeKm;
       if (normalized > 1.0) {
         normalized = 1.0;
       } else if (normalized < 0.0 || isnan(normalized)) {
@@ -492,7 +599,9 @@ void drawRadar() {
       }
 
       float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
-      uint16_t baseColor = radarContacts[i].inbound ? COLOR_RADAR_INBOUND : COLOR_RADAR_CONTACT;
+      uint16_t baseColor = radarContacts[i].inbound
+                              ? (flashOn ? COLOR_RADAR_INBOUND : COLOR_BACKGROUND)
+                              : COLOR_RADAR_CONTACT;
       uint16_t fadedColor = fadeColor(baseColor, alpha);
       tft.fillCircle(contactX, contactY, 3, fadedColor);
     }
@@ -527,14 +636,23 @@ void fetchAircraft() {
     dataConnectionOk = false;
     closestAircraft.valid = false;
     aircraftCount = 0;
-  resetRadarContacts();
-  updateDisplay();
-  return;
-}
+    resetRadarContacts();
+    updateDisplay();
+    return;
+  }
 
   HTTPClient http;
   char url[160];
   snprintf(url, sizeof(url), "http://%s:%d/dump1090-fa/data/aircraft.json", DUMP1090_SERVER, DUMP1090_PORT);
+
+  double radarRangeKm = currentRadarRangeKm();
+  double alertRangeKm = currentAlertRangeKm();
+  if (radarRangeKm <= 0.0) {
+    radarRangeKm = 0.1;
+  }
+  if (alertRangeKm <= 0.0) {
+    alertRangeKm = 0.1;
+  }
 
   if (!http.begin(url)) {
     dataConnectionOk = false;
@@ -577,7 +695,7 @@ void fetchAircraft() {
           continue;
         }
 
-        if (distance > RADAR_MAX_RANGE_KM) {
+        if (distance > radarRangeKm) {
           continue;
         }
 
@@ -588,6 +706,11 @@ void fetchAircraft() {
         double track = NAN;
         double minutesToClosest = NAN;
         bool inbound = false;
+
+        if (distance <= alertRangeKm) {
+          inbound = true;
+          minutesToClosest = 0.0;
+        }
 
         if (plane.containsKey("gs")) {
           JsonVariant speedVar = plane["gs"];
@@ -603,7 +726,7 @@ void fetchAircraft() {
           }
         }
 
-        if (!isnan(track) && !isnan(groundSpeed) && groundSpeed > 0) {
+        if (!inbound && !isnan(track) && !isnan(groundSpeed) && groundSpeed > 0) {
           double toBase = fmod(bearingToHome + 180.0, 360.0);
           double angleDiff = fabs(track - toBase);
           if (angleDiff > 180.0) {
@@ -611,7 +734,7 @@ void fetchAircraft() {
           }
           double crossTrack = distance * sin(deg2rad(angleDiff));
           double alongTrack = distance * cos(deg2rad(angleDiff));
-          if (angleDiff < 90.0 && fabs(crossTrack) <= INBOUND_ALERT_DISTANCE_KM && alongTrack >= 0) {
+          if (angleDiff < 90.0 && fabs(crossTrack) <= alertRangeKm && alongTrack >= 0) {
             inbound = true;
             double speedKmMin = groundSpeed * 1.852 / 60.0;
             if (speedKmMin > 0) {
@@ -823,11 +946,14 @@ void configureButtons() {
     btn.h = BUTTON_HEIGHT;
     btn.state = false;
     if (i == 0) {
-      btn.name = "Button 1";
+      btn.name = "Radar";
+      btn.type = BUTTON_RADAR_RANGE;
     } else if (i == 1) {
-      btn.name = "Button 2";
+      btn.name = "Alert";
+      btn.type = BUTTON_ALERT_RANGE;
     } else {
       btn.name = "Button";
+      btn.type = BUTTON_UNKNOWN;
     }
   }
 }
@@ -846,15 +972,30 @@ void drawButton(int index) {
   }
 
   TouchButton &btn = buttons[index];
-  uint16_t fillColor = btn.state ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
+  uint16_t fillColor = COLOR_BUTTON_INACTIVE;
   tft.fillRoundRect(btn.x, btn.y, btn.w, btn.h, 8, fillColor);
   tft.drawRoundRect(btn.x, btn.y, btn.w, btn.h, 8, COLOR_RADAR_OUTLINE);
 
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(COLOR_TEXT, fillColor);
   tft.setTextSize(2);
-  const char *label = btn.state ? "ON" : "OFF";
-  tft.drawString(label, btn.x + btn.w / 2, btn.y + btn.h / 2);
+
+  int centerX = btn.x + btn.w / 2;
+  int centerY = btn.y + btn.h / 2;
+  String title = btn.name ? String(btn.name) : String("Button");
+  String value;
+
+  if (btn.type == BUTTON_RADAR_RANGE) {
+    value = String(currentRadarRangeKm(), 0) + " km";
+  } else if (btn.type == BUTTON_ALERT_RANGE) {
+    value = String(currentAlertRangeKm(), 0) + " km";
+  } else {
+    value = btn.state ? String("ON") : String("OFF");
+  }
+
+  tft.drawString(title, centerX, centerY - 10);
+  tft.drawString(value, centerX, centerY + 12);
+  tft.setTextSize(1);
 }
 
 bool readTouchPoint(int &screenX, int &screenY) {
@@ -932,8 +1073,7 @@ void handleTouch() {
   for (int i = 0; i < BUTTON_COUNT; ++i) {
     TouchButton &btn = buttons[i];
     if (touchX >= btn.x && touchX <= btn.x + btn.w && touchY >= btn.y && touchY <= btn.y + btn.h) {
-      btn.state = !btn.state;
-      drawButton(i);
+      handleRangeButton(btn.type);
       break;
     }
   }
