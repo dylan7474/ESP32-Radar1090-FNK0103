@@ -64,7 +64,6 @@ static const int WIFI_ICON_BARS = 4;
 static const int WIFI_ICON_BAR_WIDTH = 5;
 static const int WIFI_ICON_BAR_SPACING = 3;
 static const int WIFI_ICON_HEIGHT = 20;
-static const unsigned long WIFI_STATUS_REFRESH_MS = 1000;
 
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite radarSprite = TFT_eSprite(&tft);
@@ -97,7 +96,6 @@ unsigned long lastRadarFrameTime = 0;
 
 int lastWifiBars = -1;
 bool lastWifiConnectedState = false;
-unsigned long lastWifiUpdateTime = 0;
 
 int radarCenterX = 0;
 int radarCenterY = 0;
@@ -267,7 +265,6 @@ void drawStaticLayout() {
 
   lastWifiBars = -1;
   lastWifiConnectedState = false;
-  lastWifiUpdateTime = 0;
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
@@ -739,7 +736,6 @@ String formatTimeAgo(unsigned long ms) {
 }
 
 void drawStatusBar() {
-  unsigned long now = millis();
   int iconWidth = WIFI_ICON_BARS * WIFI_ICON_BAR_WIDTH + (WIFI_ICON_BARS - 1) * WIFI_ICON_BAR_SPACING;
   int iconX = tft.width() - RADAR_MARGIN - iconWidth;
   int iconY = RADAR_MARGIN / 2;
@@ -762,11 +758,10 @@ void drawStatusBar() {
     }
   }
 
-  if (connected != lastWifiConnectedState || barsActive != lastWifiBars || now - lastWifiUpdateTime >= WIFI_STATUS_REFRESH_MS) {
+  if (connected != lastWifiConnectedState || barsActive != lastWifiBars) {
     drawWifiIcon(iconX, iconY, barsActive, connected);
     lastWifiConnectedState = connected;
     lastWifiBars = barsActive;
-    lastWifiUpdateTime = now;
   }
 }
 
