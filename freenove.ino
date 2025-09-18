@@ -9,6 +9,7 @@
 #include <EEPROM.h>
 
 #include "config.h"
+#include "plane_icon.h"
 
 // --- Display & Timing Constants ---
 static const uint16_t COLOR_BACKGROUND = TFT_BLACK;
@@ -335,6 +336,22 @@ bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 void rotateRadarOrientation();
 
+uint16_t applyAircraftIconIntensity(uint16_t baseColor, uint8_t intensity) {
+  uint16_t r = (baseColor >> 11) & 0x1F;
+  uint16_t g = (baseColor >> 5) & 0x3F;
+  uint16_t b = baseColor & 0x1F;
+
+  r = (uint16_t)((r * intensity + 127) / 255);
+  g = (uint16_t)((g * intensity + 127) / 255);
+  b = (uint16_t)((b * intensity + 127) / 255);
+
+  if (r > 0x1F) r = 0x1F;
+  if (g > 0x3F) g = 0x3F;
+  if (b > 0x1F) b = 0x1F;
+
+  return (r << 11) | (g << 5) | b;
+}
+
 template <typename GFX>
 void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, float size, uint16_t color) {
   if (size <= 0.0f || isnan(headingDeg)) {
@@ -349,30 +366,39 @@ void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, flo
   double sinHeading = sin(headingRad);
   double cosHeading = cos(headingRad);
 
-  struct IconPoint {
-    int x;
-    int y;
-  };
+  float scale = (2.0f * size) / max(PLANE_ICON_HEIGHT - 1, 1);
+  if (scale <= 0.0f || isnan(scale)) {
+    return;
+  }
 
-  auto transformPoint = [&](float localX, float localY) -> IconPoint {
-    double rotatedX = localX * cosHeading - localY * sinHeading;
-    double rotatedY = localX * sinHeading + localY * cosHeading;
-    IconPoint p;
-    p.x = centerX + (int)round(rotatedX);
-    p.y = centerY + (int)round(rotatedY);
-    return p;
-  };
+  float halfWidth = (PLANE_ICON_WIDTH - 1) * 0.5f;
+  float halfHeight = (PLANE_ICON_HEIGHT - 1) * 0.5f;
 
-  IconPoint nose = transformPoint(0.0f, -size);
-  IconPoint leftWing = transformPoint(-size * 0.6f, size * 0.6f);
-  IconPoint rightWing = transformPoint(size * 0.6f, size * 0.6f);
-  IconPoint tail = transformPoint(0.0f, size);
-  IconPoint tailLeft = transformPoint(-size * 0.25f, size * 0.2f);
-  IconPoint tailRight = transformPoint(size * 0.25f, size * 0.2f);
+  for (int y = 0; y < PLANE_ICON_HEIGHT; ++y) {
+    for (int x = 0; x < PLANE_ICON_WIDTH; ++x) {
+      int index = y * PLANE_ICON_WIDTH + x;
+      uint8_t alpha = pgm_read_byte(&PLANE_ICON_ALPHA[index]);
+      if (alpha < 16) {
+        continue;
+      }
 
-  gfx.fillTriangle(nose.x, nose.y, leftWing.x, leftWing.y, rightWing.x, rightWing.y, color);
-  gfx.fillTriangle(leftWing.x, leftWing.y, tail.x, tail.y, rightWing.x, rightWing.y, color);
-  gfx.drawLine(tailLeft.x, tailLeft.y, tailRight.x, tailRight.y, color);
+      uint8_t intensity = pgm_read_byte(&PLANE_ICON_INTENSITY[index]);
+      uint8_t effectiveIntensity = (uint8_t)((intensity * alpha + 127) / 255);
+      if (effectiveIntensity == 0) {
+        continue;
+      }
+
+      float localX = (x - halfWidth) * scale;
+      float localY = (y - halfHeight) * scale;
+      double rotatedX = localX * cosHeading - localY * sinHeading;
+      double rotatedY = localX * sinHeading + localY * cosHeading;
+      int drawX = centerX + (int)round(rotatedX);
+      int drawY = centerY + (int)round(rotatedY);
+
+      uint16_t tintedColor = applyAircraftIconIntensity(color, effectiveIntensity);
+      gfx.drawPixel(drawX, drawY, tintedColor);
+    }
+  }
 }
 
 template <typename GFX>
