@@ -39,6 +39,7 @@ static const int INFO_TABLE_HEADER_HEIGHT = 48;
 static const int INFO_TABLE_PADDING = 8;
 static const int COMPASS_LABEL_OFFSET = 16;
 static const int COMPASS_TEXT_SIZE = 2;
+static const float AIRCRAFT_ICON_SIZE = 6.0f;
 
 static const int BUTTON_COUNT = 2;
 static const int BUTTON_HEIGHT = 48;
@@ -275,8 +276,6 @@ void fetchAircraft();
 double haversine(double lat1, double lon1, double lat2, double lon2);
 double calculateBearing(double lat1, double lon1, double lat2, double lon2);
 double deg2rad(double deg);
-String bearingToCardinal(double bearing);
-String formatBearingString(double bearing);
 String formatTimeAgo(unsigned long ms);
 uint16_t fadeColor(uint16_t color, float alpha);
 double angularDifference(double a, double b);
@@ -288,6 +287,46 @@ void drawButton(int index);
 bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 void rotateRadarOrientation();
+
+template <typename GFX>
+void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, float size, uint16_t color) {
+  if (size <= 0.0f || isnan(headingDeg)) {
+    return;
+  }
+
+  double normalizedHeading = fmod(headingDeg, 360.0);
+  if (normalizedHeading < 0.0) {
+    normalizedHeading += 360.0;
+  }
+  double headingRad = deg2rad(normalizedHeading);
+  double sinHeading = sin(headingRad);
+  double cosHeading = cos(headingRad);
+
+  struct IconPoint {
+    int x;
+    int y;
+  };
+
+  auto transformPoint = [&](float localX, float localY) -> IconPoint {
+    double rotatedX = localX * cosHeading - localY * sinHeading;
+    double rotatedY = localX * sinHeading + localY * cosHeading;
+    IconPoint p;
+    p.x = centerX + (int)round(rotatedX);
+    p.y = centerY + (int)round(rotatedY);
+    return p;
+  };
+
+  IconPoint nose = transformPoint(0.0f, -size);
+  IconPoint leftWing = transformPoint(-size * 0.6f, size * 0.6f);
+  IconPoint rightWing = transformPoint(size * 0.6f, size * 0.6f);
+  IconPoint tail = transformPoint(0.0f, size);
+  IconPoint tailLeft = transformPoint(-size * 0.25f, size * 0.2f);
+  IconPoint tailRight = transformPoint(size * 0.25f, size * 0.2f);
+
+  gfx.fillTriangle(nose.x, nose.y, leftWing.x, leftWing.y, rightWing.x, rightWing.y, color);
+  gfx.fillTriangle(leftWing.x, leftWing.y, tail.x, tail.y, rightWing.x, rightWing.y, color);
+  gfx.drawLine(tailLeft.x, tailLeft.y, tailRight.x, tailRight.y, color);
+}
 
 template <typename GFX>
 void drawCompassLabels(GFX &gfx, int centerX, int centerY, int radius, double rotationOffsetDeg) {
@@ -548,7 +587,6 @@ void renderInfoPanel() {
       altitudeValue = String(activeContact->altitude) + " ft";
     }
     addRow("Altitude", altitudeValue);
-    addRow("Bearing", String(activeContact->bearing, 0) + " deg");
     if (!isnan(activeContact->track)) {
       addRow("Track", String(activeContact->track, 0) + " deg");
     }
@@ -577,7 +615,6 @@ void renderInfoPanel() {
       altitudeValue = String(closestAircraft.altitude) + " ft";
     }
     addRow("Altitude", altitudeValue);
-    addRow("Bearing", String(closestAircraft.bearing, 0) + " deg");
     if (!isnan(closestAircraft.track)) {
       addRow("Track", String(closestAircraft.track, 0) + " deg");
     }
@@ -585,8 +622,7 @@ void renderInfoPanel() {
       addRow("ETA", String(closestAircraft.minutesToClosest, 1) + " min");
     }
   } else {
-    String statusMessage = dataConnectionOk ? String("Waiting for traffic") : String("Awaiting data link");
-    addRow("Flight", statusMessage);
+    addRow("Flight", "");
     addRow("Speed", "--");
     addRow("Distance", "--");
     addRow("Altitude", "--");
@@ -838,7 +874,11 @@ void drawRadar() {
         baseColor = COLOR_RADAR_CONTACT;
       }
       uint16_t fadedColor = fadeColor(baseColor, alpha);
-      radarSprite.fillCircle(contactX, contactY, 3, fadedColor);
+      double headingDeg = radarContacts[i].track;
+      if (isnan(headingDeg)) {
+        headingDeg = radarContacts[i].bearing;
+      }
+      drawAircraftIcon(radarSprite, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
     }
 
     int spriteX = radarCenterX - radarRadius;
@@ -909,7 +949,11 @@ void drawRadar() {
         baseColor = COLOR_RADAR_CONTACT;
       }
       uint16_t fadedColor = fadeColor(baseColor, alpha);
-      tft.fillCircle(contactX, contactY, 3, fadedColor);
+      double headingDeg = radarContacts[i].track;
+      if (isnan(headingDeg)) {
+        headingDeg = radarContacts[i].bearing;
+      }
+      drawAircraftIcon(tft, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
     }
 
   }
@@ -1236,31 +1280,6 @@ double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
   double bearing = atan2(y, x);
   bearing = fmod((bearing * 180.0 / PI + 360.0), 360.0);
   return bearing;
-}
-
-String bearingToCardinal(double bearing) {
-  if (isnan(bearing)) {
-    return String("---");
-  }
-  static const char *directions[] = {
-    "N", "NNE", "NE", "ENE",
-    "E", "ESE", "SE", "SSE",
-    "S", "SSW", "SW", "WSW",
-    "W", "WNW", "NW", "NNW"
-  };
-  double normalized = fmod(bearing + 360.0, 360.0);
-  int index = (int)round(normalized / 22.5) % 16;
-  return String(directions[index]);
-}
-
-String formatBearingString(double bearing) {
-  if (isnan(bearing)) {
-    return String("---");
-  }
-  double normalized = fmod(bearing + 360.0, 360.0);
-  char buffer[24];
-  snprintf(buffer, sizeof(buffer), "%.0f°", normalized);
-  return String(buffer) + " (" + bearingToCardinal(normalized) + ")";
 }
 
 String formatTimeAgo(unsigned long ms) {
