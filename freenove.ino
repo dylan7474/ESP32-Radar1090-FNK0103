@@ -17,8 +17,8 @@ static const uint16_t COLOR_RADAR_GRID = TFT_DARKGREY;
 static const uint16_t COLOR_RADAR_CONTACT = TFT_GREEN;
 static const uint16_t COLOR_RADAR_INBOUND = TFT_RED;
 static const uint16_t COLOR_RADAR_HOME = TFT_SKYBLUE;
-static const int INFO_TOP_MARGIN = 16;
-static const int INFO_LINE_HEIGHT = 28;
+static const int INFO_TOP_MARGIN = 10;
+static const int INFO_LINE_HEIGHT = 20;
 static const unsigned long REFRESH_INTERVAL_MS = 5000;
 static const unsigned long WIFI_RETRY_INTERVAL_MS = 15000;
 static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
@@ -98,6 +98,7 @@ int infoAreaX = 0;
 int infoAreaY = 0;
 int infoAreaWidth = 0;
 int infoAreaHeight = 0;
+int buttonAreaY = 0;
 
 struct TouchButton {
   int x;
@@ -212,19 +213,31 @@ void drawStaticLayout() {
   infoAreaWidth = max(tft.width() - RADAR_MARGIN * 2, 0);
   infoAreaY = radarAreaY + radarAreaHeight + RADAR_MARGIN;
   infoAreaHeight = max(tft.height() - infoAreaY - RADAR_MARGIN, 0);
+  int textAreaHeight = max(infoAreaHeight - BUTTON_HEIGHT - BUTTON_SPACING, 0);
+  buttonAreaY = infoAreaY + textAreaHeight;
+  if (textAreaHeight > 0) {
+    buttonAreaY += BUTTON_SPACING;
+  }
+  int infoAreaBottom = infoAreaY + infoAreaHeight;
+  if (buttonAreaY + BUTTON_HEIGHT > infoAreaBottom) {
+    buttonAreaY = max(infoAreaBottom - BUTTON_HEIGHT, infoAreaY);
+  }
 
   tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, infoAreaHeight, COLOR_BACKGROUND);
 
   configureButtons();
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(2);
+  tft.setTextSize(1);
   drawRadar();
   drawButtons();
 }
 
 void drawInfoLine(int index, const String &text) {
   int y = infoAreaY + INFO_TOP_MARGIN + index * INFO_LINE_HEIGHT;
+  if (y + INFO_LINE_HEIGHT > buttonAreaY) {
+    return;
+  }
   String content = text.length() ? text : " ";
   int padding = max(infoAreaWidth - 8, 0);
   tft.setTextPadding(padding);
@@ -235,9 +248,11 @@ void updateDisplay() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
   tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, infoAreaHeight, COLOR_BACKGROUND);
-  tft.setTextSize(2);
+  tft.setTextSize(1);
 
   int lineIndex = 0;
+  int availableTextHeight = max(buttonAreaY - infoAreaY - INFO_TOP_MARGIN, 0);
+  int maxLines = INFO_LINE_HEIGHT > 0 ? availableTextHeight / INFO_LINE_HEIGHT : 0;
   if (closestAircraft.valid) {
     String flight = closestAircraft.flight.length() ? closestAircraft.flight : String("(unknown)");
     flight.trim();
@@ -245,23 +260,35 @@ void updateDisplay() {
     if (closestAircraft.inbound) {
       header += "  INBOUND";
     }
-    drawInfoLine(lineIndex++, header);
+    if (lineIndex < maxLines) {
+      drawInfoLine(lineIndex++, header);
+    }
 
-    drawInfoLine(lineIndex++, "Distance: " + String(closestAircraft.distanceKm, 1) + " km");
+    if (lineIndex < maxLines) {
+      drawInfoLine(lineIndex++, "Distance: " + String(closestAircraft.distanceKm, 1) + " km");
+    }
 
     if (closestAircraft.altitude >= 0) {
-      drawInfoLine(lineIndex++, "Altitude: " + String(closestAircraft.altitude) + " ft");
+      if (lineIndex < maxLines) {
+        drawInfoLine(lineIndex++, "Altitude: " + String(closestAircraft.altitude) + " ft");
+      }
     }
 
     if (!isnan(closestAircraft.groundSpeed) && closestAircraft.groundSpeed >= 0) {
-      drawInfoLine(lineIndex++, "Speed: " + String(closestAircraft.groundSpeed, 0) + " kt");
+      if (lineIndex < maxLines) {
+        drawInfoLine(lineIndex++, "Speed: " + String(closestAircraft.groundSpeed, 0) + " kt");
+      }
     }
 
     if (closestAircraft.inbound && !isnan(closestAircraft.minutesToClosest) && closestAircraft.minutesToClosest >= 0) {
-      drawInfoLine(lineIndex++, "ETA: " + String(closestAircraft.minutesToClosest, 1) + " min");
+      if (lineIndex < maxLines) {
+        drawInfoLine(lineIndex++, "ETA: " + String(closestAircraft.minutesToClosest, 1) + " min");
+      }
     }
   } else {
-    drawInfoLine(lineIndex++, "No aircraft in range");
+    if (lineIndex < maxLines) {
+      drawInfoLine(lineIndex++, "No aircraft in range");
+    }
   }
 
   if (aircraftCount > 0) {
@@ -269,7 +296,9 @@ void updateDisplay() {
     if (inboundAircraftCount > 0) {
       trafficLine += " (" + String(inboundAircraftCount) + " in)";
     }
-    drawInfoLine(lineIndex++, trafficLine);
+    if (lineIndex < maxLines) {
+      drawInfoLine(lineIndex++, trafficLine);
+    }
   }
 
   tft.setTextPadding(0);
@@ -660,7 +689,7 @@ void configureButtons() {
     }
   }
 
-  int buttonY = infoAreaY + infoAreaHeight - BUTTON_HEIGHT;
+  int buttonY = buttonAreaY;
   for (int i = 0; i < BUTTON_COUNT; ++i) {
     TouchButton &btn = buttons[i];
     btn.x = infoAreaX + i * (buttonWidth + BUTTON_SPACING);
