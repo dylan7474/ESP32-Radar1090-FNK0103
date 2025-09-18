@@ -489,9 +489,10 @@ void renderInfoPanel() {
     if (!flight.length()) {
       flight = String("(Unknown)");
     }
-    headerTitle = "Flight " + flight;
-    headerSubtitle = activeContact->inbound ? String("Inbound alert") : String("Monitoring target");
+    headerTitle = "Active target";
+    headerSubtitle = "";
 
+    addRow("Flight", flight);
     String speedValue = "--";
     if (!isnan(activeContact->groundSpeed) && activeContact->groundSpeed >= 0) {
       speedValue = String(activeContact->groundSpeed, 0) + " kt";
@@ -518,9 +519,10 @@ void renderInfoPanel() {
     if (!flight.length()) {
       flight = String("(unknown)");
     }
-    headerTitle = "Closest " + flight;
-    headerSubtitle = closestAircraft.inbound ? String("Inbound alert") : String("Nearest target");
+    headerTitle = "Closest target";
+    headerSubtitle = "";
 
+    addRow("Flight", flight);
     String speedValue = "--";
     if (!isnan(closestAircraft.groundSpeed) && closestAircraft.groundSpeed >= 0) {
       speedValue = String(closestAircraft.groundSpeed, 0) + " kt";
