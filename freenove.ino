@@ -64,8 +64,14 @@ static const int WIFI_ICON_BARS = 4;
 static const int WIFI_ICON_BAR_WIDTH = 5;
 static const int WIFI_ICON_BAR_SPACING = 3;
 static const int WIFI_ICON_HEIGHT = 20;
+static const unsigned long WIFI_STATUS_REFRESH_MS = 1000;
 
 TFT_eSPI tft = TFT_eSPI();
+TFT_eSprite radarSprite = TFT_eSprite(&tft);
+
+bool radarSpriteActive = false;
+int radarSpriteWidth = 0;
+int radarSpriteHeight = 0;
 
 struct AircraftInfo {
   String flight;
@@ -88,6 +94,10 @@ unsigned long lastWifiAttempt = 0;
 unsigned long lastSuccessfulFetch = 0;
 unsigned long radarSweepStart = 0;
 unsigned long lastRadarFrameTime = 0;
+
+int lastWifiBars = -1;
+bool lastWifiConnectedState = false;
+unsigned long lastWifiUpdateTime = 0;
 
 int radarCenterX = 0;
 int radarCenterY = 0;
@@ -118,6 +128,7 @@ void updateDisplay();
 void drawInfoLine(int index, const String &text);
 void drawRadar();
 void resetRadarContacts();
+void setupRadarSprite();
 void connectWiFi();
 void fetchAircraft();
 double haversine(double lat1, double lon1, double lat2, double lon2);
@@ -199,6 +210,32 @@ void resetRadarContacts() {
   }
 }
 
+void setupRadarSprite() {
+  if (radarSpriteActive) {
+    radarSprite.deleteSprite();
+    radarSpriteActive = false;
+  }
+
+  if (radarRadius <= 0) {
+    return;
+  }
+
+  radarSpriteWidth = radarRadius * 2 + 1;
+  radarSpriteHeight = radarSpriteWidth;
+
+  if (radarSpriteWidth <= 0 || radarSpriteHeight <= 0) {
+    return;
+  }
+
+  radarSprite.setColorDepth(16);
+  if (radarSprite.createSprite(radarSpriteWidth, radarSpriteHeight) == nullptr) {
+    return;
+  }
+
+  radarSprite.fillSprite(COLOR_BACKGROUND);
+  radarSpriteActive = true;
+}
+
 void drawStaticLayout() {
   tft.fillScreen(COLOR_BACKGROUND);
   radarAreaY = 0;
@@ -226,6 +263,11 @@ void drawStaticLayout() {
   tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, infoAreaHeight, COLOR_BACKGROUND);
 
   configureButtons();
+  setupRadarSprite();
+
+  lastWifiBars = -1;
+  lastWifiConnectedState = false;
+  lastWifiUpdateTime = 0;
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
@@ -314,67 +356,123 @@ void drawRadar() {
     return;
   }
 
-  int centerX = radarCenterX;
-  int centerY = radarCenterY;
-
-  int clearWidth = max(tft.width() - RADAR_MARGIN * 2, 0);
-  int clearHeight = max(radarAreaHeight, 0);
-  if (clearWidth > 0 && clearHeight > 0) {
-    tft.fillRect(RADAR_MARGIN, radarAreaY, clearWidth, clearHeight, COLOR_BACKGROUND);
-  }
-
-  tft.fillCircle(centerX, centerY, radarRadius, COLOR_BACKGROUND);
-  tft.drawCircle(centerX, centerY, radarRadius, COLOR_RADAR_OUTLINE);
-  tft.drawCircle(centerX, centerY, radarRadius / 2, COLOR_RADAR_OUTLINE);
-
-  tft.drawFastHLine(centerX - radarRadius, centerY, radarRadius * 2, COLOR_RADAR_GRID);
-  tft.drawFastVLine(centerX, centerY - radarRadius, radarRadius * 2, COLOR_RADAR_GRID);
-
-  tft.fillCircle(centerX, centerY, 3, COLOR_RADAR_HOME);
-
   unsigned long sweepElapsed = (now - radarSweepStart) % RADAR_SWEEP_PERIOD_MS;
   double sweepProgress = (double)sweepElapsed / (double)RADAR_SWEEP_PERIOD_MS;
   double sweepAngle = sweepProgress * 360.0;
   double sweepRad = deg2rad(sweepAngle);
-  int sweepX = centerX + (int)round(sin(sweepRad) * (radarRadius - 1));
-  int sweepY = centerY - (int)round(cos(sweepRad) * (radarRadius - 1));
-  tft.drawLine(centerX, centerY, sweepX, sweepY, COLOR_RADAR_SWEEP);
 
-  for (int i = 0; i < radarContactCount; ++i) {
-    if (!radarContacts[i].valid) {
-      continue;
+  if (radarSpriteActive) {
+    radarSprite.fillSprite(COLOR_BACKGROUND);
+    int spriteCenter = radarSpriteWidth / 2;
+
+    radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_OUTLINE);
+    radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius / 2, COLOR_RADAR_OUTLINE);
+    radarSprite.drawFastHLine(spriteCenter - radarRadius, spriteCenter, radarRadius * 2, COLOR_RADAR_GRID);
+    radarSprite.drawFastVLine(spriteCenter, spriteCenter - radarRadius, radarRadius * 2, COLOR_RADAR_GRID);
+    radarSprite.fillCircle(spriteCenter, spriteCenter, 3, COLOR_RADAR_HOME);
+
+    int sweepX = spriteCenter + (int)round(sin(sweepRad) * (radarRadius - 1));
+    int sweepY = spriteCenter - (int)round(cos(sweepRad) * (radarRadius - 1));
+    radarSprite.drawLine(spriteCenter, spriteCenter, sweepX, sweepY, COLOR_RADAR_SWEEP);
+
+    for (int i = 0; i < radarContactCount; ++i) {
+      if (!radarContacts[i].valid) {
+        continue;
+      }
+
+      double normalized = radarContacts[i].distanceKm / RADAR_MAX_RANGE_KM;
+      if (normalized > 1.0) {
+        normalized = 1.0;
+      } else if (normalized < 0.0 || isnan(normalized)) {
+        continue;
+      }
+
+      double angleRad = deg2rad(radarContacts[i].bearing);
+      double radius = normalized * (radarRadius - 3);
+      int contactX = spriteCenter + (int)round(sin(angleRad) * radius);
+      int contactY = spriteCenter - (int)round(cos(angleRad) * radius);
+
+      double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
+      if (angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
+        radarContacts[i].lastHighlightTime = now;
+      }
+
+      if (radarContacts[i].lastHighlightTime == 0) {
+        continue;
+      }
+
+      unsigned long sinceHighlight = now - radarContacts[i].lastHighlightTime;
+      if (sinceHighlight > RADAR_FADE_DURATION_MS) {
+        continue;
+      }
+
+      float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
+      uint16_t baseColor = radarContacts[i].inbound ? COLOR_RADAR_INBOUND : COLOR_RADAR_CONTACT;
+      uint16_t fadedColor = fadeColor(baseColor, alpha);
+      radarSprite.fillCircle(contactX, contactY, 3, fadedColor);
     }
 
-    double normalized = radarContacts[i].distanceKm / RADAR_MAX_RANGE_KM;
-    if (normalized > 1.0) {
-      normalized = 1.0;
-    } else if (normalized < 0.0 || isnan(normalized)) {
-      continue;
+    int spriteX = radarCenterX - radarRadius;
+    int spriteY = radarCenterY - radarRadius;
+    radarSprite.pushSprite(spriteX, spriteY);
+  } else {
+    int centerX = radarCenterX;
+    int centerY = radarCenterY;
+
+    int clearWidth = max(tft.width() - RADAR_MARGIN * 2, 0);
+    int clearHeight = max(radarAreaHeight, 0);
+    if (clearWidth > 0 && clearHeight > 0) {
+      tft.fillRect(RADAR_MARGIN, radarAreaY, clearWidth, clearHeight, COLOR_BACKGROUND);
     }
 
-    double angleRad = deg2rad(radarContacts[i].bearing);
-    double radius = normalized * (radarRadius - 3);
-    int contactX = centerX + (int)round(sin(angleRad) * radius);
-    int contactY = centerY - (int)round(cos(angleRad) * radius);
+    tft.fillCircle(centerX, centerY, radarRadius, COLOR_BACKGROUND);
+    tft.drawCircle(centerX, centerY, radarRadius, COLOR_RADAR_OUTLINE);
+    tft.drawCircle(centerX, centerY, radarRadius / 2, COLOR_RADAR_OUTLINE);
 
-    double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
-    if (angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
-      radarContacts[i].lastHighlightTime = now;
+    tft.drawFastHLine(centerX - radarRadius, centerY, radarRadius * 2, COLOR_RADAR_GRID);
+    tft.drawFastVLine(centerX, centerY - radarRadius, radarRadius * 2, COLOR_RADAR_GRID);
+    tft.fillCircle(centerX, centerY, 3, COLOR_RADAR_HOME);
+
+    int sweepX = centerX + (int)round(sin(sweepRad) * (radarRadius - 1));
+    int sweepY = centerY - (int)round(cos(sweepRad) * (radarRadius - 1));
+    tft.drawLine(centerX, centerY, sweepX, sweepY, COLOR_RADAR_SWEEP);
+
+    for (int i = 0; i < radarContactCount; ++i) {
+      if (!radarContacts[i].valid) {
+        continue;
+      }
+
+      double normalized = radarContacts[i].distanceKm / RADAR_MAX_RANGE_KM;
+      if (normalized > 1.0) {
+        normalized = 1.0;
+      } else if (normalized < 0.0 || isnan(normalized)) {
+        continue;
+      }
+
+      double angleRad = deg2rad(radarContacts[i].bearing);
+      double radius = normalized * (radarRadius - 3);
+      int contactX = centerX + (int)round(sin(angleRad) * radius);
+      int contactY = centerY - (int)round(cos(angleRad) * radius);
+
+      double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
+      if (angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
+        radarContacts[i].lastHighlightTime = now;
+      }
+
+      if (radarContacts[i].lastHighlightTime == 0) {
+        continue;
+      }
+
+      unsigned long sinceHighlight = now - radarContacts[i].lastHighlightTime;
+      if (sinceHighlight > RADAR_FADE_DURATION_MS) {
+        continue;
+      }
+
+      float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
+      uint16_t baseColor = radarContacts[i].inbound ? COLOR_RADAR_INBOUND : COLOR_RADAR_CONTACT;
+      uint16_t fadedColor = fadeColor(baseColor, alpha);
+      tft.fillCircle(contactX, contactY, 3, fadedColor);
     }
-
-    if (radarContacts[i].lastHighlightTime == 0) {
-      continue;
-    }
-
-    unsigned long sinceHighlight = now - radarContacts[i].lastHighlightTime;
-    if (sinceHighlight > RADAR_FADE_DURATION_MS) {
-      continue;
-    }
-
-    float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
-    uint16_t baseColor = radarContacts[i].inbound ? COLOR_RADAR_INBOUND : COLOR_RADAR_CONTACT;
-    uint16_t fadedColor = fadeColor(baseColor, alpha);
-    tft.fillCircle(contactX, contactY, 3, fadedColor);
   }
 
   drawStatusBar();
@@ -641,6 +739,7 @@ String formatTimeAgo(unsigned long ms) {
 }
 
 void drawStatusBar() {
+  unsigned long now = millis();
   int iconWidth = WIFI_ICON_BARS * WIFI_ICON_BAR_WIDTH + (WIFI_ICON_BARS - 1) * WIFI_ICON_BAR_SPACING;
   int iconX = tft.width() - RADAR_MARGIN - iconWidth;
   int iconY = RADAR_MARGIN / 2;
@@ -663,7 +762,12 @@ void drawStatusBar() {
     }
   }
 
-  drawWifiIcon(iconX, iconY, barsActive, connected);
+  if (connected != lastWifiConnectedState || barsActive != lastWifiBars || now - lastWifiUpdateTime >= WIFI_STATUS_REFRESH_MS) {
+    drawWifiIcon(iconX, iconY, barsActive, connected);
+    lastWifiConnectedState = connected;
+    lastWifiBars = barsActive;
+    lastWifiUpdateTime = now;
+  }
 }
 
 void drawWifiIcon(int x, int y, int barsActive, bool connected) {
