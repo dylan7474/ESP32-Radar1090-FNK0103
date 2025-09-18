@@ -98,6 +98,7 @@ struct AircraftInfo {
   double minutesToClosest;
   bool inbound;
   bool valid;
+  String squawk;
 };
 
 AircraftInfo closestAircraft;
@@ -257,6 +258,7 @@ void handleRangeButton(ButtonType type) {
   drawButtons();
   resetRadarContacts();
   closestAircraft.valid = false;
+  closestAircraft.squawk = "";
   aircraftCount = 0;
   inboundAircraftCount = 0;
   updateDisplay();
@@ -276,8 +278,6 @@ void fetchAircraft();
 double haversine(double lat1, double lon1, double lat2, double lon2);
 double calculateBearing(double lat1, double lon1, double lat2, double lon2);
 double deg2rad(double deg);
-String bearingToCardinal(double bearing);
-String formatBearingString(double bearing);
 String formatTimeAgo(unsigned long ms);
 uint16_t fadeColor(uint16_t color, float alpha);
 double angularDifference(double a, double b);
@@ -400,6 +400,7 @@ void setup() {
   drawStaticLayout();
 
   closestAircraft.valid = false;
+  closestAircraft.squawk = "";
   updateDisplay();
 
   connectWiFi();
@@ -445,6 +446,7 @@ struct RadarContact {
   bool valid;
   unsigned long lastHighlightTime;
   bool stale;
+  String squawk;
 };
 
 RadarContact radarContacts[MAX_RADAR_CONTACTS];
@@ -464,6 +466,7 @@ void resetRadarContacts() {
     radarContacts[i].groundSpeed = NAN;
     radarContacts[i].track = NAN;
     radarContacts[i].minutesToClosest = NAN;
+    radarContacts[i].squawk = "";
   }
   activeContactIndex = -1;
   infoPanelDirty = true;
@@ -589,10 +592,15 @@ void renderInfoPanel() {
       altitudeValue = String(activeContact->altitude) + " ft";
     }
     addRow("Altitude", altitudeValue);
-    addRow("Bearing", String(activeContact->bearing, 0) + " deg");
-    if (!isnan(activeContact->track)) {
-      addRow("Track", String(activeContact->track, 0) + " deg");
+    String squawkValue = "--";
+    if (activeContact->squawk.length() > 0) {
+      String squawkTrimmed = activeContact->squawk;
+      squawkTrimmed.trim();
+      if (squawkTrimmed.length() > 0) {
+        squawkValue = squawkTrimmed;
+      }
     }
+    addRow("Squawk", squawkValue);
     if (activeContact->inbound) {
       if (!isnan(activeContact->minutesToClosest) && activeContact->minutesToClosest >= 0) {
         addRow("ETA", String(activeContact->minutesToClosest, 1) + " min");
@@ -618,19 +626,24 @@ void renderInfoPanel() {
       altitudeValue = String(closestAircraft.altitude) + " ft";
     }
     addRow("Altitude", altitudeValue);
-    addRow("Bearing", String(closestAircraft.bearing, 0) + " deg");
-    if (!isnan(closestAircraft.track)) {
-      addRow("Track", String(closestAircraft.track, 0) + " deg");
+    String squawkValue = "--";
+    if (closestAircraft.squawk.length() > 0) {
+      String squawkTrimmed = closestAircraft.squawk;
+      squawkTrimmed.trim();
+      if (squawkTrimmed.length() > 0) {
+        squawkValue = squawkTrimmed;
+      }
     }
+    addRow("Squawk", squawkValue);
     if (closestAircraft.inbound && !isnan(closestAircraft.minutesToClosest) && closestAircraft.minutesToClosest >= 0) {
       addRow("ETA", String(closestAircraft.minutesToClosest, 1) + " min");
     }
   } else {
-    String statusMessage = dataConnectionOk ? String("Waiting for traffic") : String("Awaiting data link");
-    addRow("Flight", statusMessage);
+    addRow("Flight", "");
     addRow("Speed", "--");
     addRow("Distance", "--");
     addRow("Altitude", "--");
+    addRow("Squawk", "--");
   }
 
   if (aircraftCount > 0) {
@@ -1000,6 +1013,7 @@ void fetchAircraft() {
   if (WiFi.status() != WL_CONNECTED) {
     dataConnectionOk = false;
     closestAircraft.valid = false;
+    closestAircraft.squawk = "";
     aircraftCount = 0;
     resetRadarContacts();
     updateDisplay();
@@ -1022,6 +1036,7 @@ void fetchAircraft() {
   if (!http.begin(url)) {
     dataConnectionOk = false;
     closestAircraft.valid = false;
+    closestAircraft.squawk = "";
     aircraftCount = 0;
     resetRadarContacts();
     updateDisplay();
@@ -1044,6 +1059,7 @@ void fetchAircraft() {
       best.track = NAN;
       best.minutesToClosest = NAN;
       best.inbound = false;
+      best.squawk = "";
       unsigned long fetchTime = millis();
       RadarContact previousContacts[MAX_RADAR_CONTACTS];
       bool previousMatched[MAX_RADAR_CONTACTS];
@@ -1131,6 +1147,23 @@ void fetchAircraft() {
           }
         }
 
+        String squawk;
+        if (plane.containsKey("squawk")) {
+          JsonVariant sqVar = plane["squawk"];
+          if (sqVar.is<const char*>()) {
+            const char *sqStr = sqVar.as<const char*>();
+            if (sqStr != nullptr) {
+              squawk = String(sqStr);
+              squawk.trim();
+            }
+          } else if (sqVar.is<int>() || sqVar.is<long>() || sqVar.is<unsigned int>() || sqVar.is<unsigned long>()) {
+            long sqValue = sqVar.as<long>();
+            char buffer[8];
+            snprintf(buffer, sizeof(buffer), "%04ld", sqValue);
+            squawk = String(buffer);
+          }
+        }
+
         int altitude = -1;
         if (plane.containsKey("alt_baro")) {
           JsonVariant alt = plane["alt_baro"];
@@ -1201,6 +1234,7 @@ void fetchAircraft() {
             }
           }
           contact.flight = flight;
+          contact.squawk = squawk;
         }
 
         if (distance < bestDistance) {
@@ -1213,13 +1247,8 @@ void fetchAircraft() {
           best.minutesToClosest = minutesToClosest;
           best.inbound = inbound;
 
-          if (plane.containsKey("flight")) {
-            const char *flightStr = plane["flight"].as<const char*>();
-            best.flight = flightStr ? String(flightStr) : String();
-          } else {
-            best.flight = "";
-          }
-
+          best.flight = flight;
+          best.squawk = squawk;
           best.altitude = altitude;
         }
       }
@@ -1249,6 +1278,7 @@ void fetchAircraft() {
     } else {
       dataConnectionOk = false;
       closestAircraft.valid = false;
+      closestAircraft.squawk = "";
       aircraftCount = 0;
       inboundAircraftCount = 0;
       resetRadarContacts();
@@ -1256,6 +1286,7 @@ void fetchAircraft() {
   } else {
     dataConnectionOk = false;
     closestAircraft.valid = false;
+    closestAircraft.squawk = "";
     aircraftCount = 0;
     inboundAircraftCount = 0;
     resetRadarContacts();
@@ -1285,31 +1316,6 @@ double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
   double bearing = atan2(y, x);
   bearing = fmod((bearing * 180.0 / PI + 360.0), 360.0);
   return bearing;
-}
-
-String bearingToCardinal(double bearing) {
-  if (isnan(bearing)) {
-    return String("---");
-  }
-  static const char *directions[] = {
-    "N", "NNE", "NE", "ENE",
-    "E", "ESE", "SE", "SSE",
-    "S", "SSW", "SW", "WSW",
-    "W", "WNW", "NW", "NNW"
-  };
-  double normalized = fmod(bearing + 360.0, 360.0);
-  int index = (int)round(normalized / 22.5) % 16;
-  return String(directions[index]);
-}
-
-String formatBearingString(double bearing) {
-  if (isnan(bearing)) {
-    return String("---");
-  }
-  double normalized = fmod(bearing + 360.0, 360.0);
-  char buffer[24];
-  snprintf(buffer, sizeof(buffer), "%.0f°", normalized);
-  return String(buffer) + " (" + bearingToCardinal(normalized) + ")";
 }
 
 String formatTimeAgo(unsigned long ms) {
