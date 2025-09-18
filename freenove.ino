@@ -17,13 +17,12 @@ static const uint16_t COLOR_RADAR_GRID = TFT_DARKGREY;
 static const uint16_t COLOR_RADAR_CONTACT = TFT_GREEN;
 static const uint16_t COLOR_RADAR_INBOUND = TFT_RED;
 static const uint16_t COLOR_RADAR_HOME = TFT_SKYBLUE;
-static const int INFO_START_Y = 58;
-static const int INFO_LINE_HEIGHT = 26;
+static const int INFO_TOP_MARGIN = 16;
+static const int INFO_LINE_HEIGHT = 28;
 static const unsigned long REFRESH_INTERVAL_MS = 5000;
 static const unsigned long WIFI_RETRY_INTERVAL_MS = 15000;
 static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
 static const double INBOUND_ALERT_DISTANCE_KM = 5.0;
-static const int RADAR_RADIUS = 48;
 static const int RADAR_MARGIN = 12;
 static const double RADAR_MAX_RANGE_KM = 25.0;
 static const int MAX_RADAR_CONTACTS = 40;
@@ -57,11 +56,17 @@ unsigned long lastSuccessfulFetch = 0;
 unsigned long radarSweepStart = 0;
 unsigned long lastRadarFrameTime = 0;
 
+int radarCenterX = 0;
+int radarCenterY = 0;
+int radarRadius = 0;
+int radarAreaWidth = 0;
+int infoAreaX = 0;
+int infoAreaWidth = 0;
+
 // --- Function Prototypes ---
 void drawStaticLayout();
 void updateDisplay();
 void drawInfoLine(int index, const String &text);
-void drawStatusLine(int index, const String &text);
 void drawRadar();
 void resetRadarContacts();
 void connectWiFi();
@@ -138,104 +143,93 @@ void resetRadarContacts() {
 
 void drawStaticLayout() {
   tft.fillScreen(COLOR_BACKGROUND);
-  tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextSize(3);
-  tft.drawString("Closest Plane Radar", tft.width() / 2, 18);
-  tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
-  tft.setTextSize(2);
-  tft.drawString("Live ADS-B Monitor", tft.width() / 2, 44);
-  tft.drawFastHLine(0, 54, tft.width(), TFT_DARKGREY);
+  radarAreaWidth = tft.width() / 2;
+  int radarDiameter = min(radarAreaWidth - RADAR_MARGIN * 2, tft.height() - RADAR_MARGIN * 2);
+  radarRadius = max(radarDiameter / 2, 0);
+  radarCenterX = RADAR_MARGIN + radarRadius;
+  radarCenterY = tft.height() / 2;
+
+  infoAreaX = radarAreaWidth + RADAR_MARGIN;
+  infoAreaWidth = max(tft.width() - infoAreaX - RADAR_MARGIN, 0);
+
+  tft.fillRect(infoAreaX, 0, infoAreaWidth, tft.height(), COLOR_BACKGROUND);
+  tft.drawFastVLine(radarAreaWidth, 0, tft.height(), COLOR_RADAR_GRID);
+
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(2);
   drawRadar();
 }
 
 void drawInfoLine(int index, const String &text) {
-  int y = INFO_START_Y + index * INFO_LINE_HEIGHT;
+  int y = INFO_TOP_MARGIN + index * INFO_LINE_HEIGHT;
   String content = text.length() ? text : " ";
-  tft.setTextPadding(tft.width() - 20);
-  tft.drawString(content, 10, y);
-}
-
-void drawStatusLine(int index, const String &text) {
-  int baseY = tft.height() - 4 * INFO_LINE_HEIGHT;
-  int y = baseY + index * INFO_LINE_HEIGHT;
-  String content = text.length() ? text : " ";
-  tft.setTextPadding(tft.width() - 20);
-  tft.drawString(content, 10, y);
+  int padding = max(infoAreaWidth - 8, 0);
+  tft.setTextPadding(padding);
+  tft.drawString(content, infoAreaX + 4, y);
 }
 
 void updateDisplay() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+  tft.fillRect(infoAreaX, 0, infoAreaWidth, tft.height(), COLOR_BACKGROUND);
+  tft.setTextSize(2);
+
+  int lineIndex = 0;
   if (closestAircraft.valid) {
     String flight = closestAircraft.flight.length() ? closestAircraft.flight : String("(unknown)");
     flight.trim();
-    String header = "Flight: " + flight;
+    String header = "Flight " + flight;
     if (closestAircraft.inbound) {
-      header += "  (INBOUND)";
+      header += "  INBOUND";
     }
-    drawInfoLine(0, header);
+    drawInfoLine(lineIndex++, header);
 
-    String distanceLine = String("Dist: ") + String(closestAircraft.distanceKm, 1) + " km  " +
-                          "Bearing: " + formatBearingString(closestAircraft.bearing);
-    drawInfoLine(1, distanceLine);
+    String distanceLine = String(closestAircraft.distanceKm, 1) + " km  " + formatBearingString(closestAircraft.bearing);
+    drawInfoLine(lineIndex++, distanceLine);
 
-    String altitudeLine = "Alt: ";
+    String detailLine;
     if (closestAircraft.altitude >= 0) {
-      altitudeLine += String(closestAircraft.altitude) + " ft";
-    } else {
-      altitudeLine += "---";
+      detailLine += String(closestAircraft.altitude) + " ft";
     }
     if (!isnan(closestAircraft.groundSpeed) && closestAircraft.groundSpeed >= 0) {
-      altitudeLine += "    Spd: " + String(closestAircraft.groundSpeed, 0) + " kt";
+      if (detailLine.length()) {
+        detailLine += "  ";
+      }
+      detailLine += String(closestAircraft.groundSpeed, 0) + " kt";
     }
-    drawInfoLine(2, altitudeLine);
-
-    String statusLine;
     if (closestAircraft.inbound) {
       if (!isnan(closestAircraft.minutesToClosest) && closestAircraft.minutesToClosest >= 0) {
-        statusLine = String("Inbound ETA: ") + String(closestAircraft.minutesToClosest, 1) + " min";
-      } else {
-        statusLine = "Inbound: ETA --";
+        if (detailLine.length()) {
+          detailLine += "  ";
+        }
+        detailLine += String(closestAircraft.minutesToClosest, 1) + " min";
       }
     } else if (!isnan(closestAircraft.track)) {
-      statusLine = String("Track: ") + formatBearingString(closestAircraft.track);
-    } else {
-      statusLine = "Track: ---";
+      if (detailLine.length()) {
+        detailLine += "  ";
+      }
+      detailLine += formatBearingString(closestAircraft.track);
     }
-    drawInfoLine(3, statusLine);
+    drawInfoLine(lineIndex++, detailLine);
   } else {
-    drawInfoLine(0, "No aircraft in range");
-    drawInfoLine(1, " ");
-    drawInfoLine(2, " ");
-    drawInfoLine(3, " ");
+    drawInfoLine(lineIndex++, "No aircraft in range");
+    drawInfoLine(lineIndex++, "");
+    drawInfoLine(lineIndex++, "");
   }
 
-  String seenLine = "Seen aircraft: " + String(aircraftCount);
-  if (inboundAircraftCount > 0) {
-    seenLine += "  inbound: " + String(inboundAircraftCount);
-  }
-  drawStatusLine(0, seenLine);
-
-  if (WiFi.status() == WL_CONNECTED) {
-    long rssi = WiFi.RSSI();
-    drawStatusLine(1, String("WiFi: connected ") + String(rssi) + " dBm");
-  } else {
-    drawStatusLine(1, "WiFi: offline");
-  }
-
-  String dataLine = String("Data link: ") + (dataConnectionOk ? "OK" : "waiting...");
-  drawStatusLine(2, dataLine);
-
-  String updateLine = "Last update: ";
+  String updateLine = "Updated: ";
   if (lastSuccessfulFetch > 0) {
     updateLine += formatTimeAgo(millis() - lastSuccessfulFetch);
   } else {
     updateLine += "--";
   }
-  drawStatusLine(3, updateLine);
+  if (aircraftCount > 0) {
+    updateLine += "  Traffic " + String(aircraftCount);
+    if (inboundAircraftCount > 0) {
+      updateLine += " (" + String(inboundAircraftCount) + " in)";
+    }
+  }
+  drawInfoLine(lineIndex++, updateLine);
 
   tft.setTextPadding(0);
   drawRadar();
@@ -244,15 +238,19 @@ void updateDisplay() {
 void drawRadar() {
   unsigned long now = millis();
   lastRadarFrameTime = now;
-  int centerX = tft.width() - RADAR_MARGIN - RADAR_RADIUS;
-  int centerY = tft.height() - RADAR_MARGIN - RADAR_RADIUS;
+  if (radarRadius <= 0) {
+    return;
+  }
 
-  tft.fillCircle(centerX, centerY, RADAR_RADIUS, COLOR_BACKGROUND);
-  tft.drawCircle(centerX, centerY, RADAR_RADIUS, COLOR_RADAR_OUTLINE);
-  tft.drawCircle(centerX, centerY, RADAR_RADIUS / 2, COLOR_RADAR_OUTLINE);
+  int centerX = radarCenterX;
+  int centerY = radarCenterY;
 
-  tft.drawFastHLine(centerX - RADAR_RADIUS, centerY, RADAR_RADIUS * 2, COLOR_RADAR_GRID);
-  tft.drawFastVLine(centerX, centerY - RADAR_RADIUS, RADAR_RADIUS * 2, COLOR_RADAR_GRID);
+  tft.fillCircle(centerX, centerY, radarRadius, COLOR_BACKGROUND);
+  tft.drawCircle(centerX, centerY, radarRadius, COLOR_RADAR_OUTLINE);
+  tft.drawCircle(centerX, centerY, radarRadius / 2, COLOR_RADAR_OUTLINE);
+
+  tft.drawFastHLine(centerX - radarRadius, centerY, radarRadius * 2, COLOR_RADAR_GRID);
+  tft.drawFastVLine(centerX, centerY - radarRadius, radarRadius * 2, COLOR_RADAR_GRID);
 
   tft.fillCircle(centerX, centerY, 3, COLOR_RADAR_HOME);
 
@@ -260,8 +258,8 @@ void drawRadar() {
   double sweepProgress = (double)sweepElapsed / (double)RADAR_SWEEP_PERIOD_MS;
   double sweepAngle = sweepProgress * 360.0;
   double sweepRad = deg2rad(sweepAngle);
-  int sweepX = centerX + (int)round(sin(sweepRad) * (RADAR_RADIUS - 1));
-  int sweepY = centerY - (int)round(cos(sweepRad) * (RADAR_RADIUS - 1));
+  int sweepX = centerX + (int)round(sin(sweepRad) * (radarRadius - 1));
+  int sweepY = centerY - (int)round(cos(sweepRad) * (radarRadius - 1));
   tft.drawLine(centerX, centerY, sweepX, sweepY, COLOR_RADAR_SWEEP);
 
   for (int i = 0; i < radarContactCount; ++i) {
@@ -277,7 +275,7 @@ void drawRadar() {
     }
 
     double angleRad = deg2rad(radarContacts[i].bearing);
-    double radius = normalized * (RADAR_RADIUS - 3);
+    double radius = normalized * (radarRadius - 3);
     int contactX = centerX + (int)round(sin(angleRad) * radius);
     int contactY = centerY - (int)round(cos(angleRad) * radius);
 
