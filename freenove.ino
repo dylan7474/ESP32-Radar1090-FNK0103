@@ -146,6 +146,28 @@ unsigned long lastTouchTime = 0;
 int activeContactIndex = -1;
 bool infoPanelDirty = true;
 
+struct InfoTableRow {
+  String label;
+  String value;
+};
+
+struct InfoPanelCache {
+  bool initialized;
+  int cachedInfoAreaX;
+  int cachedInfoAreaY;
+  int cachedInfoAreaWidth;
+  int cachedTextAreaHeight;
+  int cachedHeaderHeight;
+  int cachedTableTop;
+  int cachedDividerX;
+  int cachedRowCount;
+  String cachedHeaderTitle;
+  String cachedHeaderSubtitle;
+  InfoTableRow cachedRows[10];
+};
+
+InfoPanelCache infoPanelCache = {};
+
 void drawButtons();
 void resetRadarContacts();
 void updateDisplay();
@@ -405,6 +427,10 @@ void drawStaticLayout() {
   }
 
   tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, infoAreaHeight, COLOR_BACKGROUND);
+  infoPanelCache.initialized = false;
+  infoPanelCache.cachedRowCount = 0;
+  infoPanelCache.cachedHeaderTitle = "";
+  infoPanelCache.cachedHeaderSubtitle = "";
 
   configureButtons();
   setupRadarSprite();
@@ -435,8 +461,6 @@ void renderInfoPanel() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextPadding(0);
 
-  tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_INFO_TABLE_BG);
-
   const RadarContact *activeContact = nullptr;
   if (activeContactIndex >= 0 && activeContactIndex < radarContactCount) {
     RadarContact &candidate = radarContacts[activeContactIndex];
@@ -446,11 +470,7 @@ void renderInfoPanel() {
     }
   }
 
-  struct TableRow {
-    String label;
-    String value;
-  };
-  TableRow rows[10];
+  InfoTableRow rows[10];
   int rowCount = 0;
   auto addRow = [&](const String &label, const String &value) {
     if (rowCount < (int)(sizeof(rows) / sizeof(rows[0]))) {
@@ -472,15 +492,16 @@ void renderInfoPanel() {
     headerTitle = "Flight " + flight;
     headerSubtitle = activeContact->inbound ? String("Inbound alert") : String("Monitoring target");
 
-    addRow("Status", activeContact->inbound ? "Inbound" : "Outbound");
+    String speedValue = "--";
+    if (!isnan(activeContact->groundSpeed) && activeContact->groundSpeed >= 0) {
+      speedValue = String(activeContact->groundSpeed, 0) + " kt";
+    }
+    addRow("Speed", speedValue);
     addRow("Distance", String(activeContact->distanceKm, 1) + " km");
     if (activeContact->altitude >= 0) {
       addRow("Altitude", String(activeContact->altitude) + " ft");
     }
     addRow("Bearing", String(activeContact->bearing, 0) + " deg");
-    if (!isnan(activeContact->groundSpeed) && activeContact->groundSpeed >= 0) {
-      addRow("Speed", String(activeContact->groundSpeed, 0) + " kt");
-    }
     if (!isnan(activeContact->track)) {
       addRow("Track", String(activeContact->track, 0) + " deg");
     }
@@ -500,15 +521,16 @@ void renderInfoPanel() {
     headerTitle = "Closest " + flight;
     headerSubtitle = closestAircraft.inbound ? String("Inbound alert") : String("Nearest target");
 
-    addRow("Status", closestAircraft.inbound ? "Inbound" : "Monitoring");
+    String speedValue = "--";
+    if (!isnan(closestAircraft.groundSpeed) && closestAircraft.groundSpeed >= 0) {
+      speedValue = String(closestAircraft.groundSpeed, 0) + " kt";
+    }
+    addRow("Speed", speedValue);
     addRow("Distance", String(closestAircraft.distanceKm, 1) + " km");
     if (closestAircraft.altitude >= 0) {
       addRow("Altitude", String(closestAircraft.altitude) + " ft");
     }
     addRow("Bearing", String(closestAircraft.bearing, 0) + " deg");
-    if (!isnan(closestAircraft.groundSpeed) && closestAircraft.groundSpeed >= 0) {
-      addRow("Speed", String(closestAircraft.groundSpeed, 0) + " kt");
-    }
     if (!isnan(closestAircraft.track)) {
       addRow("Track", String(closestAircraft.track, 0) + " deg");
     }
@@ -535,40 +557,95 @@ void renderInfoPanel() {
     rowCount = maxRows;
   }
 
-  tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, headerHeight, COLOR_INFO_TABLE_HEADER_BG);
-  tft.drawFastHLine(infoAreaX, infoAreaY + headerHeight - 1, infoAreaWidth, COLOR_INFO_TABLE_BORDER);
+  int tableTop = infoAreaY + headerHeight;
+  int dividerX = infoAreaX + infoAreaWidth / 2;
 
-  int headerCenterX = infoAreaX + infoAreaWidth / 2;
-  int textHeight = INFO_TEXT_SIZE * 8;
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(COLOR_TEXT, COLOR_INFO_TABLE_HEADER_BG);
-  if (headerSubtitle.length()) {
-    int titleY = infoAreaY + headerHeight / 2 - textHeight / 2;
-    int subtitleY = titleY + textHeight;
-    if (titleY < infoAreaY + INFO_TABLE_PADDING) {
-      titleY = infoAreaY + INFO_TABLE_PADDING;
-      subtitleY = titleY + textHeight;
+  bool geometryChanged = !infoPanelCache.initialized || infoPanelCache.cachedInfoAreaX != infoAreaX ||
+                         infoPanelCache.cachedInfoAreaY != infoAreaY ||
+                         infoPanelCache.cachedInfoAreaWidth != infoAreaWidth ||
+                         infoPanelCache.cachedTextAreaHeight != textAreaHeight;
+
+  bool rowStructureChanged = geometryChanged || infoPanelCache.cachedHeaderHeight != headerHeight ||
+                             infoPanelCache.cachedRowCount != rowCount;
+
+  if (rowStructureChanged) {
+    tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_INFO_TABLE_BG);
+    tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, headerHeight, COLOR_INFO_TABLE_HEADER_BG);
+    tft.drawRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_INFO_TABLE_BORDER);
+
+    if (rowCount > 0) {
+      int tableHeight = rowCount * INFO_TABLE_ROW_HEIGHT;
+      tft.drawFastVLine(dividerX, tableTop, tableHeight, COLOR_INFO_TABLE_BORDER);
+      for (int i = 0; i < rowCount; ++i) {
+        int rowY = tableTop + i * INFO_TABLE_ROW_HEIGHT;
+        tft.drawFastHLine(infoAreaX, rowY, infoAreaWidth, COLOR_INFO_TABLE_BORDER);
+      }
+      tft.drawFastHLine(infoAreaX, tableTop + rowCount * INFO_TABLE_ROW_HEIGHT, infoAreaWidth, COLOR_INFO_TABLE_BORDER);
     }
-    if (subtitleY > infoAreaY + headerHeight - INFO_TABLE_PADDING) {
-      subtitleY = infoAreaY + headerHeight - INFO_TABLE_PADDING;
-    }
-    tft.drawString(headerTitle, headerCenterX, titleY);
-    tft.drawString(headerSubtitle, headerCenterX, subtitleY);
-  } else {
-    tft.drawString(headerTitle, headerCenterX, infoAreaY + headerHeight / 2);
   }
 
-  int tableTop = infoAreaY + headerHeight;
-  int tableHeight = rowCount * INFO_TABLE_ROW_HEIGHT;
-  if (rowCount > 0) {
-    tft.drawFastHLine(infoAreaX, tableTop, infoAreaWidth, COLOR_INFO_TABLE_BORDER);
-    int dividerX = infoAreaX + infoAreaWidth / 2;
-    tft.drawFastVLine(dividerX, tableTop, tableHeight, COLOR_INFO_TABLE_BORDER);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(COLOR_TEXT, COLOR_INFO_TABLE_BG);
-    for (int i = 0; i < rowCount; ++i) {
-      int rowY = tableTop + i * INFO_TABLE_ROW_HEIGHT;
-      tft.drawFastHLine(infoAreaX, rowY, infoAreaWidth, COLOR_INFO_TABLE_BORDER);
+  int textHeight = INFO_TEXT_SIZE * 8;
+  bool headerTextChanged = rowStructureChanged || headerTitle != infoPanelCache.cachedHeaderTitle ||
+                           headerSubtitle != infoPanelCache.cachedHeaderSubtitle;
+  if (headerTextChanged) {
+    int headerFillX = infoAreaX + 1;
+    int headerFillY = infoAreaY + 1;
+    int headerFillW = max(infoAreaWidth - 2, 0);
+    int headerFillH = max(headerHeight - 2, 0);
+    if (headerFillW > 0 && headerFillH > 0) {
+      tft.fillRect(headerFillX, headerFillY, headerFillW, headerFillH, COLOR_INFO_TABLE_HEADER_BG);
+    }
+
+    int headerCenterX = infoAreaX + infoAreaWidth / 2;
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(COLOR_TEXT, COLOR_INFO_TABLE_HEADER_BG);
+    if (headerSubtitle.length()) {
+      int titleY = infoAreaY + headerHeight / 2 - textHeight / 2;
+      int subtitleY = titleY + textHeight;
+      if (titleY < infoAreaY + INFO_TABLE_PADDING) {
+        titleY = infoAreaY + INFO_TABLE_PADDING;
+        subtitleY = titleY + textHeight;
+      }
+      if (subtitleY > infoAreaY + headerHeight - INFO_TABLE_PADDING) {
+        subtitleY = infoAreaY + headerHeight - INFO_TABLE_PADDING;
+      }
+      tft.drawString(headerTitle, headerCenterX, titleY);
+      tft.drawString(headerSubtitle, headerCenterX, subtitleY);
+    } else {
+      tft.drawString(headerTitle, headerCenterX, infoAreaY + headerHeight / 2);
+    }
+  }
+
+  int rowsToProcess = max(rowCount, infoPanelCache.cachedRowCount);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COLOR_TEXT, COLOR_INFO_TABLE_BG);
+  for (int i = 0; i < rowsToProcess; ++i) {
+    bool rowExists = i < rowCount;
+    bool hadRow = i < infoPanelCache.cachedRowCount;
+    bool rowChanged = rowStructureChanged || (rowExists && (!hadRow || rows[i].label != infoPanelCache.cachedRows[i].label ||
+                                                           rows[i].value != infoPanelCache.cachedRows[i].value)) ||
+                      (!rowExists && hadRow);
+    if (!rowChanged) {
+      continue;
+    }
+
+    int rowY = tableTop + i * INFO_TABLE_ROW_HEIGHT;
+    int rowFillY = rowY + 1;
+    int rowFillH = max(INFO_TABLE_ROW_HEIGHT - 1, 0);
+    if (rowFillH > 0) {
+      int labelFillX = infoAreaX + 1;
+      int labelFillW = max(dividerX - labelFillX - 1, 0);
+      if (labelFillW > 0) {
+        tft.fillRect(labelFillX, rowFillY, labelFillW, rowFillH, COLOR_INFO_TABLE_BG);
+      }
+      int valueFillX = dividerX + 1;
+      int valueFillW = max(infoAreaX + infoAreaWidth - 1 - valueFillX, 0);
+      if (valueFillW > 0) {
+        tft.fillRect(valueFillX, rowFillY, valueFillW, rowFillH, COLOR_INFO_TABLE_BG);
+      }
+    }
+
+    if (rowExists) {
       int textY = rowY + max((INFO_TABLE_ROW_HEIGHT - textHeight) / 2, 0);
       int labelWidth = dividerX - infoAreaX - INFO_TABLE_PADDING * 2;
       if (labelWidth < 0) {
@@ -583,12 +660,30 @@ void renderInfoPanel() {
       tft.setTextPadding(valueWidth);
       tft.drawString(rows[i].value, dividerX + INFO_TABLE_PADDING, textY);
     }
-    tft.drawFastHLine(infoAreaX, tableTop + tableHeight, infoAreaWidth, COLOR_INFO_TABLE_BORDER);
   }
 
-  tft.drawRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_INFO_TABLE_BORDER);
   tft.setTextPadding(0);
   tft.setTextDatum(TL_DATUM);
+
+  infoPanelCache.initialized = true;
+  infoPanelCache.cachedInfoAreaX = infoAreaX;
+  infoPanelCache.cachedInfoAreaY = infoAreaY;
+  infoPanelCache.cachedInfoAreaWidth = infoAreaWidth;
+  infoPanelCache.cachedTextAreaHeight = textAreaHeight;
+  infoPanelCache.cachedHeaderHeight = headerHeight;
+  infoPanelCache.cachedTableTop = tableTop;
+  infoPanelCache.cachedDividerX = dividerX;
+  infoPanelCache.cachedRowCount = rowCount;
+  infoPanelCache.cachedHeaderTitle = headerTitle;
+  infoPanelCache.cachedHeaderSubtitle = headerSubtitle;
+  for (int i = 0; i < rowCount; ++i) {
+    infoPanelCache.cachedRows[i] = rows[i];
+  }
+  for (int i = rowCount; i < (int)(sizeof(infoPanelCache.cachedRows) / sizeof(infoPanelCache.cachedRows[0])); ++i) {
+    infoPanelCache.cachedRows[i].label = "";
+    infoPanelCache.cachedRows[i].value = "";
+  }
+
   infoPanelDirty = false;
 }
 
