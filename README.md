@@ -1,42 +1,29 @@
 # ClosestPlane ESP32
 
-An Arduino-compatible sketch for ESP32 boards that connects to a dump1090 server and renders a sweeping radar view on a 4 inch Freenove EPS32 Display (FNK0103). Aircraft within the selected range appear as blips and a short tone plays as the sweep crosses each target. Volume, radar range and sweep speed are controlled with two rotary encoders and saved to EEPROM.
+An Arduino-compatible sketch for the Freenove ESP32 4.0" display board (FNK0103) that connects to a dump1090 server and renders a simple radar status panel on the integrated TFT. The display shows the closest aircraft, distance, bearing, altitude, track, and connection status so you can keep an eye on nearby traffic at a glance.
 
 ## Required Libraries
 
-Install the following libraries in the Arduino IDE before compiling:
+Install the following libraries in the Arduino IDE (or via `arduino-cli`) before compiling:
 
-- **ESP32 board support** (`esp32` by Espressif) – provides WiFi, HTTPClient, Wire and I2S functionality.
-- **Adafruit GFX Library**
-- **Adafruit SH110X**
-- **ArduinoJson**
-- **SimpleRotary** – handles the rotary encoders for volume and range control.
+- **ESP32 board support** (`esp32` by Espressif) – provides WiFi and HTTPClient functionality.
+- **ArduinoJson** – parses the `aircraft.json` feed from dump1090.
+- **TFT_eSPI** – drives the 4" IPS TFT included with the Freenove board. Configure the library's `User_Setup_Select.h`/`User_Setup.h` files for the FNK0103 before compiling.
 
 ## Hardware Connections
 
-Connect the following components to your ESP32:
-
-- **SH1106 128×64 OLED** (I²C): SDA → GPIO21, SCL → GPIO22, plus 3.3 V and GND.
-- **MAX98357A I2S amplifier**: BCLK → GPIO17, LRCLK → GPIO16, DIN → GPIO27, SD → GPIO19, 3.3 V and GND.
-- **Range rotary encoder**: A → GPIO33, B → GPIO4, switch → GPIO23.
-- **Mode/volume rotary encoder**: A → GPIO25, B → GPIO32, switch → GPIO2.
+The sketch targets the Freenove FNK0103 kit where the ESP32, TFT backplane and touch buttons share a common PCB. No external wiring is required beyond providing power and ensuring the TFT_eSPI library is configured for the panel that ships with the kit. If you adapt the sketch to another ESP32 + TFT combination, update the TFT_eSPI pin definitions accordingly.
 
 ## Setup
-1. Rename `config.h` with your WiFi credentials, dump1090 server address and your latitude/longitude. Adjust I2S pin numbers if required.
-2. Ensure the libraries above are installed in the Arduino IDE.
-3. Open `closestPlane.ino` in the Arduino IDE, select your ESP32 board and the correct port.
+1. Update `config.h` with your WiFi credentials, dump1090 server address and your latitude/longitude.
+2. Ensure the libraries above are installed in the Arduino IDE and that TFT_eSPI is configured for the Freenove display.
+3. Open `freenove.ino` in the Arduino IDE, select your ESP32 board and the correct port.
 4. Compile and upload.
 
 ## Operation
-- The display shows a radar sweep of aircraft within range. Each time the sweep crosses a target a short beep is produced.
-- Rotate the mode/volume encoder to adjust beep volume, sweep speed, alert distance, or to rotate the radar through the four compass points when compass mode is selected.
-- Press the mode/volume encoder to cycle between these control modes.
-- Rotate the range encoder to adjust radar range.
-- Long-press the range encoder to power off.
-- Settings persist in EEPROM and a small antenna icon indicates a good data connection.
-- Aircraft predicted to pass within the alert radius flash on the radar and trigger a single alert tone. The display shows minutes until the closest inbound aircraft reaches minimum distance.
-- Each aircraft is tracked individually in an `alertedFlights` list so it will only trigger the siren once while inbound.
-- The alarm sounds again only if that aircraft leaves the inbound zone (bearing difference over 90° or cross-track distance beyond the alert radius) and later re-enters, or if a different aircraft meets the inbound criteria.
+- The TFT lists the closest aircraft detected within the configured radius and highlights whether it is inbound.
+- Connection, WiFi strength and fetch timing are summarised near the bottom of the display.
+- Aircraft distance, bearing, altitude, track and estimated arrival (for inbound flights) refresh every five seconds while the ESP32 maintains a WiFi link to the dump1090 server.
 
 ## Building in a Codex/Codespace Environment
 
@@ -115,15 +102,13 @@ echo "==> Installing ESP32 core"
 retry 5 5 arduino-cli core install esp32:esp32
 
 echo "==> Installing libraries"
-retry 5 5 arduino-cli lib install "Adafruit GFX Library"
 retry 5 5 arduino-cli lib install "ArduinoJson"
-retry 5 5 arduino-cli lib install "Adafruit SH110X"
-retry 5 5 arduino-cli lib install "SimpleRotary"
+retry 5 5 arduino-cli lib install "TFT_eSPI"
 
 echo "✅ Setup complete. Compile with:"
-echo "   arduino-cli compile --fqbn esp32:esp32:esp32 closestPlane.ino"
+echo "   arduino-cli compile --fqbn esp32:esp32:esp32 freenove.ino"
 ```
 
-The command completes successfully when the required libraries (Adafruit SH110X, SimpleRotary, etc.) are installed.
+The command completes successfully when the required libraries (`ArduinoJson`, `TFT_eSPI`, etc.) are installed.
 
 

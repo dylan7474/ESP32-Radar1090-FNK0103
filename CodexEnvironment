@@ -70,10 +70,8 @@ echo "==> Installing ESP32 core"
 retry 5 5 arduino-cli core install esp32:esp32
 
 echo "==> Installing libraries"
-retry 5 5 arduino-cli lib install "Adafruit GFX Library"
 retry 5 5 arduino-cli lib install "ArduinoJson"
-retry 5 5 arduino-cli lib install "Adafruit SH110X"
-retry 5 5 arduino-cli lib install "SimpleRotary"
+retry 5 5 arduino-cli lib install "TFT_eSPI"
 
 echo "✅ Setup complete. Compile with:"
-echo "   arduino-cli compile --fqbn esp32:esp32:esp32 ESP32-Radar1090-FNK0103.ino"
+echo "   arduino-cli compile --fqbn esp32:esp32:esp32 freenove.ino"
