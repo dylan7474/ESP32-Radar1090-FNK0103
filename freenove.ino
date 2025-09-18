@@ -31,6 +31,17 @@ static const unsigned long RADAR_FADE_DURATION_MS = 4000;
 static const unsigned long RADAR_FRAME_INTERVAL_MS = 40;
 static const double RADAR_SWEEP_WIDTH_DEG = 3.0;
 static const uint16_t COLOR_RADAR_SWEEP = TFT_DARKGREEN;
+static const uint16_t COLOR_BUTTON_ACTIVE = TFT_DARKGREEN;
+static const uint16_t COLOR_BUTTON_INACTIVE = TFT_DARKGREY;
+
+static const int BUTTON_COUNT = 2;
+static const int BUTTON_HEIGHT = 48;
+static const int BUTTON_SPACING = 12;
+static const unsigned long TOUCH_DEBOUNCE_MS = 250;
+static const int WIFI_ICON_BARS = 4;
+static const int WIFI_ICON_BAR_WIDTH = 5;
+static const int WIFI_ICON_BAR_SPACING = 3;
+static const int WIFI_ICON_HEIGHT = 20;
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -59,9 +70,24 @@ unsigned long lastRadarFrameTime = 0;
 int radarCenterX = 0;
 int radarCenterY = 0;
 int radarRadius = 0;
-int radarAreaWidth = 0;
+int radarAreaY = 0;
+int radarAreaHeight = 0;
 int infoAreaX = 0;
+int infoAreaY = 0;
 int infoAreaWidth = 0;
+int infoAreaHeight = 0;
+
+struct TouchButton {
+  int x;
+  int y;
+  int w;
+  int h;
+  bool state;
+  const char *name;
+};
+
+TouchButton buttons[BUTTON_COUNT];
+unsigned long lastTouchTime = 0;
 
 // --- Function Prototypes ---
 void drawStaticLayout();
@@ -79,11 +105,17 @@ String formatBearingString(double bearing);
 String formatTimeAgo(unsigned long ms);
 uint16_t fadeColor(uint16_t color, float alpha);
 double angularDifference(double a, double b);
+void drawStatusBar();
+void drawWifiIcon(int x, int y, int barsActive, bool connected);
+void configureButtons();
+void drawButtons();
+void drawButton(int index);
+void handleTouch();
 
 void setup() {
   Serial.begin(115200);
   tft.begin();
-  tft.setRotation(1);
+  tft.setRotation(0);
   radarSweepStart = millis();
   resetRadarContacts();
   drawStaticLayout();
@@ -117,6 +149,8 @@ void loop() {
     drawRadar();
   }
 
+  handleTouch();
+
   delay(10);
 }
 
@@ -143,25 +177,31 @@ void resetRadarContacts() {
 
 void drawStaticLayout() {
   tft.fillScreen(COLOR_BACKGROUND);
-  radarAreaWidth = tft.width() / 2;
-  int radarDiameter = min(radarAreaWidth - RADAR_MARGIN * 2, tft.height() - RADAR_MARGIN * 2);
+  radarAreaY = 0;
+  radarAreaHeight = tft.height() / 2;
+  int availableRadarHeight = max(radarAreaHeight - RADAR_MARGIN * 2, 0);
+  int radarDiameter = min(tft.width() - RADAR_MARGIN * 2, availableRadarHeight);
   radarRadius = max(radarDiameter / 2, 0);
-  radarCenterX = RADAR_MARGIN + radarRadius;
-  radarCenterY = tft.height() / 2;
+  radarCenterX = tft.width() / 2;
+  radarCenterY = radarAreaY + RADAR_MARGIN + radarRadius;
 
-  infoAreaX = radarAreaWidth + RADAR_MARGIN;
-  infoAreaWidth = max(tft.width() - infoAreaX - RADAR_MARGIN, 0);
+  infoAreaX = RADAR_MARGIN;
+  infoAreaWidth = max(tft.width() - RADAR_MARGIN * 2, 0);
+  infoAreaY = radarAreaY + radarAreaHeight + RADAR_MARGIN;
+  infoAreaHeight = max(tft.height() - infoAreaY - RADAR_MARGIN, 0);
 
-  tft.fillRect(infoAreaX, 0, infoAreaWidth, tft.height(), COLOR_BACKGROUND);
-  tft.drawFastVLine(radarAreaWidth, 0, tft.height(), COLOR_RADAR_GRID);
+  tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, infoAreaHeight, COLOR_BACKGROUND);
+
+  configureButtons();
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(2);
   drawRadar();
+  drawButtons();
 }
 
 void drawInfoLine(int index, const String &text) {
-  int y = INFO_TOP_MARGIN + index * INFO_LINE_HEIGHT;
+  int y = infoAreaY + INFO_TOP_MARGIN + index * INFO_LINE_HEIGHT;
   String content = text.length() ? text : " ";
   int padding = max(infoAreaWidth - 8, 0);
   tft.setTextPadding(padding);
@@ -171,7 +211,7 @@ void drawInfoLine(int index, const String &text) {
 void updateDisplay() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
-  tft.fillRect(infoAreaX, 0, infoAreaWidth, tft.height(), COLOR_BACKGROUND);
+  tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, infoAreaHeight, COLOR_BACKGROUND);
   tft.setTextSize(2);
 
   int lineIndex = 0;
@@ -211,6 +251,8 @@ void updateDisplay() {
 
   tft.setTextPadding(0);
   drawRadar();
+  drawButtons();
+  drawStatusBar();
 }
 
 void drawRadar() {
@@ -222,6 +264,12 @@ void drawRadar() {
 
   int centerX = radarCenterX;
   int centerY = radarCenterY;
+
+  int clearWidth = max(tft.width() - RADAR_MARGIN * 2, 0);
+  int clearHeight = max(radarAreaHeight, 0);
+  if (clearWidth > 0 && clearHeight > 0) {
+    tft.fillRect(RADAR_MARGIN, radarAreaY, clearWidth, clearHeight, COLOR_BACKGROUND);
+  }
 
   tft.fillCircle(centerX, centerY, radarRadius, COLOR_BACKGROUND);
   tft.drawCircle(centerX, centerY, radarRadius, COLOR_RADAR_OUTLINE);
@@ -276,6 +324,8 @@ void drawRadar() {
     uint16_t fadedColor = fadeColor(baseColor, alpha);
     tft.fillCircle(contactX, contactY, 3, fadedColor);
   }
+
+  drawStatusBar();
 }
 
 void connectWiFi() {
@@ -304,10 +354,10 @@ void fetchAircraft() {
     dataConnectionOk = false;
     closestAircraft.valid = false;
     aircraftCount = 0;
-    resetRadarContacts();
-    updateDisplay();
-    return;
-  }
+  resetRadarContacts();
+  updateDisplay();
+  return;
+}
 
   HTTPClient http;
   char url[160];
@@ -536,6 +586,121 @@ String formatTimeAgo(unsigned long ms) {
   char buffer[24];
   snprintf(buffer, sizeof(buffer), "%luh %02lum ago", hours, minutes);
   return String(buffer);
+}
+
+void drawStatusBar() {
+  int iconWidth = WIFI_ICON_BARS * WIFI_ICON_BAR_WIDTH + (WIFI_ICON_BARS - 1) * WIFI_ICON_BAR_SPACING;
+  int iconX = tft.width() - RADAR_MARGIN - iconWidth;
+  int iconY = RADAR_MARGIN / 2;
+
+  bool connected = WiFi.status() == WL_CONNECTED;
+  int rssi = connected ? WiFi.RSSI() : -100;
+  int barsActive = 0;
+
+  if (connected) {
+    if (rssi >= -55) {
+      barsActive = 4;
+    } else if (rssi >= -65) {
+      barsActive = 3;
+    } else if (rssi >= -75) {
+      barsActive = 2;
+    } else if (rssi >= -85) {
+      barsActive = 1;
+    } else {
+      barsActive = 0;
+    }
+  }
+
+  drawWifiIcon(iconX, iconY, barsActive, connected);
+}
+
+void drawWifiIcon(int x, int y, int barsActive, bool connected) {
+  int iconWidth = WIFI_ICON_BARS * WIFI_ICON_BAR_WIDTH + (WIFI_ICON_BARS - 1) * WIFI_ICON_BAR_SPACING;
+  tft.fillRect(x, y, iconWidth, WIFI_ICON_HEIGHT, COLOR_BACKGROUND);
+
+  uint16_t activeColor = connected ? TFT_SKYBLUE : COLOR_RADAR_GRID;
+  for (int i = 0; i < WIFI_ICON_BARS; ++i) {
+    int barHeight = 6 + i * 3;
+    int barX = x + i * (WIFI_ICON_BAR_WIDTH + WIFI_ICON_BAR_SPACING);
+    int barY = y + WIFI_ICON_HEIGHT - barHeight;
+    uint16_t color = (i < barsActive) ? activeColor : COLOR_RADAR_GRID;
+    tft.fillRect(barX, barY, WIFI_ICON_BAR_WIDTH, barHeight, color);
+  }
+}
+
+void configureButtons() {
+  int buttonWidth = 0;
+  if (BUTTON_COUNT > 0) {
+    buttonWidth = (infoAreaWidth - BUTTON_SPACING * (BUTTON_COUNT - 1)) / BUTTON_COUNT;
+    if (buttonWidth < 0) {
+      buttonWidth = 0;
+    }
+  }
+
+  int buttonY = infoAreaY + infoAreaHeight - BUTTON_HEIGHT;
+  for (int i = 0; i < BUTTON_COUNT; ++i) {
+    TouchButton &btn = buttons[i];
+    btn.x = infoAreaX + i * (buttonWidth + BUTTON_SPACING);
+    btn.y = buttonY;
+    btn.w = buttonWidth;
+    btn.h = BUTTON_HEIGHT;
+    btn.state = false;
+    if (i == 0) {
+      btn.name = "Button 1";
+    } else if (i == 1) {
+      btn.name = "Button 2";
+    } else {
+      btn.name = "Button";
+    }
+  }
+}
+
+void drawButtons() {
+  for (int i = 0; i < BUTTON_COUNT; ++i) {
+    drawButton(i);
+  }
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+}
+
+void drawButton(int index) {
+  if (index < 0 || index >= BUTTON_COUNT) {
+    return;
+  }
+
+  TouchButton &btn = buttons[index];
+  uint16_t fillColor = btn.state ? COLOR_BUTTON_ACTIVE : COLOR_BUTTON_INACTIVE;
+  tft.fillRoundRect(btn.x, btn.y, btn.w, btn.h, 8, fillColor);
+  tft.drawRoundRect(btn.x, btn.y, btn.w, btn.h, 8, COLOR_RADAR_OUTLINE);
+
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(COLOR_TEXT, fillColor);
+  String label = String(btn.name) + ": " + (btn.state ? "ON" : "OFF");
+  tft.drawString(label, btn.x + btn.w / 2, btn.y + btn.h / 2);
+}
+
+void handleTouch() {
+  uint16_t tx = 0;
+  uint16_t ty = 0;
+  if (!tft.getTouch(&tx, &ty)) {
+    return;
+  }
+
+  unsigned long now = millis();
+  if (now - lastTouchTime < TOUCH_DEBOUNCE_MS) {
+    return;
+  }
+  lastTouchTime = now;
+
+  for (int i = 0; i < BUTTON_COUNT; ++i) {
+    TouchButton &btn = buttons[i];
+    if (tx >= btn.x && tx <= btn.x + btn.w && ty >= btn.y && ty <= btn.y + btn.h) {
+      btn.state = !btn.state;
+      drawButton(i);
+    }
+  }
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
 }
 
 double angularDifference(double a, double b) {
