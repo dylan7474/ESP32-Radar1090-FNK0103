@@ -312,6 +312,7 @@ struct RadarContact {
   String flight;
   bool valid;
   unsigned long lastHighlightTime;
+  bool stale;
 };
 
 RadarContact radarContacts[MAX_RADAR_CONTACTS];
@@ -326,6 +327,7 @@ void resetRadarContacts() {
     radarContacts[i].inbound = false;
     radarContacts[i].distanceKm = 0.0;
     radarContacts[i].bearing = 0.0;
+    radarContacts[i].stale = false;
   }
 }
 
@@ -542,7 +544,7 @@ void drawRadar() {
       int contactY = spriteCenter - (int)round(cos(angleRad) * radius);
 
       double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
-      if (angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
+      if (!radarContacts[i].stale && angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
         radarContacts[i].lastHighlightTime = now;
       }
 
@@ -552,13 +554,19 @@ void drawRadar() {
 
       unsigned long sinceHighlight = now - radarContacts[i].lastHighlightTime;
       if (sinceHighlight > RADAR_FADE_DURATION_MS) {
+        radarContacts[i].valid = false;
         continue;
       }
 
       float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
-      uint16_t baseColor = radarContacts[i].inbound
-                              ? (flashOn ? COLOR_RADAR_INBOUND : COLOR_BACKGROUND)
-                              : COLOR_RADAR_CONTACT;
+      uint16_t baseColor;
+      if (radarContacts[i].inbound) {
+        baseColor = radarContacts[i].stale
+                        ? COLOR_RADAR_INBOUND
+                        : (flashOn ? COLOR_RADAR_INBOUND : COLOR_BACKGROUND);
+      } else {
+        baseColor = COLOR_RADAR_CONTACT;
+      }
       uint16_t fadedColor = fadeColor(baseColor, alpha);
       radarSprite.fillCircle(contactX, contactY, 3, fadedColor);
     }
@@ -607,7 +615,7 @@ void drawRadar() {
       int contactY = centerY - (int)round(cos(angleRad) * radius);
 
       double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
-      if (angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
+      if (!radarContacts[i].stale && angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
         radarContacts[i].lastHighlightTime = now;
       }
 
@@ -617,13 +625,19 @@ void drawRadar() {
 
       unsigned long sinceHighlight = now - radarContacts[i].lastHighlightTime;
       if (sinceHighlight > RADAR_FADE_DURATION_MS) {
+        radarContacts[i].valid = false;
         continue;
       }
 
       float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
-      uint16_t baseColor = radarContacts[i].inbound
-                              ? (flashOn ? COLOR_RADAR_INBOUND : COLOR_BACKGROUND)
-                              : COLOR_RADAR_CONTACT;
+      uint16_t baseColor;
+      if (radarContacts[i].inbound) {
+        baseColor = radarContacts[i].stale
+                        ? COLOR_RADAR_INBOUND
+                        : (flashOn ? COLOR_RADAR_INBOUND : COLOR_BACKGROUND);
+      } else {
+        baseColor = COLOR_RADAR_CONTACT;
+      }
       uint16_t fadedColor = fadeColor(baseColor, alpha);
       tft.fillCircle(contactX, contactY, 3, fadedColor);
     }
@@ -705,6 +719,15 @@ void fetchAircraft() {
       best.track = NAN;
       best.minutesToClosest = NAN;
       best.inbound = false;
+      unsigned long fetchTime = millis();
+      RadarContact previousContacts[MAX_RADAR_CONTACTS];
+      bool previousMatched[MAX_RADAR_CONTACTS];
+      int previousCount = radarContactCount;
+      for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
+        previousContacts[i] = radarContacts[i];
+        previousMatched[i] = false;
+      }
+
       aircraftCount = 0;
       resetRadarContacts();
       int localInboundCount = 0;
@@ -773,19 +796,65 @@ void fetchAircraft() {
           localInboundCount++;
         }
 
+        String flight;
+        if (plane.containsKey("flight")) {
+          const char *flightStr = plane["flight"].as<const char*>();
+          if (flightStr != nullptr) {
+            flight = String(flightStr);
+            flight.trim();
+          }
+        }
+
+        int matchIndex = -1;
+        if (previousCount > 0) {
+          if (flight.length() > 0) {
+            for (int j = 0; j < previousCount; ++j) {
+              if (previousMatched[j] || !previousContacts[j].valid) {
+                continue;
+              }
+              String prevFlight = previousContacts[j].flight;
+              prevFlight.trim();
+              if (prevFlight.length() == 0) {
+                continue;
+              }
+              if (prevFlight.equalsIgnoreCase(flight)) {
+                matchIndex = j;
+                break;
+              }
+            }
+          }
+
+          if (matchIndex < 0) {
+            for (int j = 0; j < previousCount; ++j) {
+              if (previousMatched[j] || !previousContacts[j].valid) {
+                continue;
+              }
+              double distanceDiff = fabs(previousContacts[j].distanceKm - distance);
+              double bearingDiff = angularDifference(previousContacts[j].bearing, bearingToHome);
+              if (distanceDiff <= 1.0 && bearingDiff <= 12.0) {
+                matchIndex = j;
+                break;
+              }
+            }
+          }
+        }
+
         if (radarContactCount < MAX_RADAR_CONTACTS) {
           RadarContact &contact = radarContacts[radarContactCount++];
           contact.distanceKm = distance;
           contact.bearing = bearingToHome;
           contact.inbound = inbound;
           contact.valid = true;
+          contact.stale = false;
           contact.lastHighlightTime = 0;
-          if (plane.containsKey("flight")) {
-            const char *flightStr = plane["flight"].as<const char*>();
-            contact.flight = flightStr ? String(flightStr) : String();
-          } else {
-            contact.flight = "";
+          if (matchIndex >= 0) {
+            unsigned long previousHighlight = previousContacts[matchIndex].lastHighlightTime;
+            if (previousHighlight != 0 && (fetchTime - previousHighlight) < RADAR_FADE_DURATION_MS) {
+              contact.lastHighlightTime = previousHighlight;
+            }
+            previousMatched[matchIndex] = true;
           }
+          contact.flight = flight;
         }
 
         if (distance < bestDistance) {
@@ -820,10 +889,24 @@ void fetchAircraft() {
         }
       }
 
+      for (int i = 0; i < previousCount && radarContactCount < MAX_RADAR_CONTACTS; ++i) {
+        if (previousMatched[i] || !previousContacts[i].valid) {
+          continue;
+        }
+        unsigned long lastHighlight = previousContacts[i].lastHighlightTime;
+        if (lastHighlight == 0 || (fetchTime - lastHighlight) > RADAR_FADE_DURATION_MS) {
+          continue;
+        }
+        RadarContact &contact = radarContacts[radarContactCount++];
+        contact = previousContacts[i];
+        contact.valid = true;
+        contact.stale = true;
+      }
+
       closestAircraft = best;
       inboundAircraftCount = localInboundCount;
       if (best.valid) {
-        lastSuccessfulFetch = millis();
+        lastSuccessfulFetch = fetchTime;
       }
     } else {
       dataConnectionOk = false;
