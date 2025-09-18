@@ -58,7 +58,7 @@ static const unsigned long TOUCH_DEBOUNCE_MS = 250;
 #define TOUCH_INVERT_X 0
 #endif
 #ifndef TOUCH_INVERT_Y
-#define TOUCH_INVERT_Y 0
+#define TOUCH_INVERT_Y 1
 #endif
 static const int WIFI_ICON_BARS = 4;
 static const int WIFI_ICON_BAR_WIDTH = 5;
@@ -710,37 +710,52 @@ bool readTouchPoint(int &screenX, int &screenY) {
     return false;
   }
 
+  long calMinX = TOUCH_RAW_MIN_X;
+  long calMaxX = TOUCH_RAW_MAX_X;
+  long calMinY = TOUCH_RAW_MIN_Y;
+  long calMaxY = TOUCH_RAW_MAX_Y;
+
+#if TOUCH_SWAP_XY
+  uint16_t rawSwap = rawX;
+  rawX = rawY;
+  rawY = rawSwap;
+  long calSwap = calMinX;
+  calMinX = calMinY;
+  calMinY = calSwap;
+  calSwap = calMaxX;
+  calMaxX = calMaxY;
+  calMaxY = calSwap;
+#endif
+
+#if TOUCH_INVERT_X
+  long calSwap = calMinX;
+  calMinX = calMaxX;
+  calMaxX = calSwap;
+#endif
+
+#if TOUCH_INVERT_Y
+  long calSwap = calMinY;
+  calMinY = calMaxY;
+  calMaxY = calSwap;
+#endif
+
   long mappedX = rawX;
   long mappedY = rawY;
 
-  if (TOUCH_RAW_MAX_X > TOUCH_RAW_MIN_X) {
-    mappedX = map(rawX, TOUCH_RAW_MIN_X, TOUCH_RAW_MAX_X, 0, (long)tft.width() - 1);
+  if (calMaxX != calMinX) {
+    mappedX = map((long)rawX, calMinX, calMaxX, 0, (long)tft.width() - 1);
   } else {
     mappedX = rawX % tft.width();
   }
 
-  if (TOUCH_RAW_MAX_Y > TOUCH_RAW_MIN_Y) {
-    mappedY = map(rawY, TOUCH_RAW_MIN_Y, TOUCH_RAW_MAX_Y, 0, (long)tft.height() - 1);
+  if (calMaxY != calMinY) {
+    mappedY = map((long)rawY, calMinY, calMaxY, 0, (long)tft.height() - 1);
   } else {
     mappedY = rawY % tft.height();
   }
 
   mappedX = constrain(mappedX, 0, (long)tft.width() - 1);
   mappedY = constrain(mappedY, 0, (long)tft.height() - 1);
-
-#if TOUCH_SWAP_XY
-  long swap = mappedX;
-  mappedX = mappedY;
-  mappedY = swap;
-#endif
-
-#if TOUCH_INVERT_X
-  mappedX = (long)tft.width() - 1 - mappedX;
-#endif
-
-#if TOUCH_INVERT_Y
-  mappedY = (long)tft.height() - 1 - mappedY;
-#endif
 
   screenX = (int)mappedX;
   screenY = (int)mappedY;
