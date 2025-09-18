@@ -6,6 +6,7 @@
 #include <SPI.h>
 #include <math.h>
 #include <cstring>
+#include <EEPROM.h>
 
 #include "config.h"
 
@@ -79,6 +80,13 @@ static const int ALERT_RANGE_OPTION_COUNT = sizeof(ALERT_RANGE_OPTIONS_KM) / siz
 static const double DEFAULT_RADAR_RANGE_KM = 25.0;
 static const double DEFAULT_ALERT_RANGE_KM = 5.0;
 
+static const uint8_t EEPROM_MAGIC_VALUE = 0xA5;
+static const int EEPROM_MAGIC_ADDR = 0;
+static const int EEPROM_RADAR_RANGE_ADDR = 1;
+static const int EEPROM_ALERT_RANGE_ADDR = 2;
+static const int EEPROM_RADAR_ROTATION_ADDR = 3;
+static const int EEPROM_SIZE = 4;
+
 static const int COMPASS_LABEL_COUNT = 4;
 
 TFT_eSPI tft = TFT_eSPI();
@@ -130,6 +138,8 @@ int buttonAreaY = 0;
 
 uint8_t displayRotation = 0;
 uint8_t radarRotationSteps = 0;
+
+bool eepromInitialized = false;
 
 enum ButtonType {
   BUTTON_RADAR_RANGE,
@@ -189,6 +199,7 @@ void resetRadarContacts();
 void updateDisplay();
 void fetchAircraft();
 void initializeRangeIndices();
+void persistSettings();
 double currentRadarRangeKm();
 double currentAlertRangeKm();
 void cycleRadarRange();
@@ -200,22 +211,54 @@ bool clearActiveContact();
 bool ensureActiveContactFresh(unsigned long now);
 
 void initializeRangeIndices() {
-  radarRangeIndex = 0;
-  alertRangeIndex = 0;
+  bool loadedFromEeprom = false;
 
-  for (int i = 0; i < RADAR_RANGE_OPTION_COUNT; ++i) {
-    if (fabs(RADAR_RANGE_OPTIONS_KM[i] - DEFAULT_RADAR_RANGE_KM) < 0.01) {
-      radarRangeIndex = i;
-      break;
+  if (eepromInitialized && EEPROM.read(EEPROM_MAGIC_ADDR) == EEPROM_MAGIC_VALUE) {
+    uint8_t storedRadarIndex = EEPROM.read(EEPROM_RADAR_RANGE_ADDR);
+    uint8_t storedAlertIndex = EEPROM.read(EEPROM_ALERT_RANGE_ADDR);
+    uint8_t storedRotation = EEPROM.read(EEPROM_RADAR_ROTATION_ADDR);
+
+    if (storedRadarIndex < RADAR_RANGE_OPTION_COUNT && storedAlertIndex < ALERT_RANGE_OPTION_COUNT && storedRotation < 4) {
+      radarRangeIndex = storedRadarIndex;
+      alertRangeIndex = storedAlertIndex;
+      radarRotationSteps = storedRotation;
+      loadedFromEeprom = true;
     }
   }
 
-  for (int i = 0; i < ALERT_RANGE_OPTION_COUNT; ++i) {
-    if (fabs(ALERT_RANGE_OPTIONS_KM[i] - DEFAULT_ALERT_RANGE_KM) < 0.01) {
-      alertRangeIndex = i;
-      break;
+  if (!loadedFromEeprom) {
+    radarRangeIndex = 0;
+    alertRangeIndex = 0;
+    radarRotationSteps = 0;
+
+    for (int i = 0; i < RADAR_RANGE_OPTION_COUNT; ++i) {
+      if (fabs(RADAR_RANGE_OPTIONS_KM[i] - DEFAULT_RADAR_RANGE_KM) < 0.01) {
+        radarRangeIndex = i;
+        break;
+      }
     }
+
+    for (int i = 0; i < ALERT_RANGE_OPTION_COUNT; ++i) {
+      if (fabs(ALERT_RANGE_OPTIONS_KM[i] - DEFAULT_ALERT_RANGE_KM) < 0.01) {
+        alertRangeIndex = i;
+        break;
+      }
+    }
+
+    persistSettings();
   }
+}
+
+void persistSettings() {
+  if (!eepromInitialized) {
+    return;
+  }
+
+  EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VALUE);
+  EEPROM.write(EEPROM_RADAR_RANGE_ADDR, (uint8_t)radarRangeIndex);
+  EEPROM.write(EEPROM_ALERT_RANGE_ADDR, (uint8_t)alertRangeIndex);
+  EEPROM.write(EEPROM_RADAR_ROTATION_ADDR, (uint8_t)radarRotationSteps);
+  EEPROM.commit();
 }
 
 double currentRadarRangeKm() {
@@ -237,6 +280,7 @@ void cycleRadarRange() {
     return;
   }
   radarRangeIndex = (radarRangeIndex + 1) % RADAR_RANGE_OPTION_COUNT;
+  persistSettings();
 }
 
 void cycleAlertRange() {
@@ -244,6 +288,7 @@ void cycleAlertRange() {
     return;
   }
   alertRangeIndex = (alertRangeIndex + 1) % ALERT_RANGE_OPTION_COUNT;
+  persistSettings();
 }
 
 void handleRangeButton(ButtonType type) {
@@ -394,6 +439,10 @@ void setup() {
   tft.begin();
   displayRotation = 0;
   tft.setRotation(displayRotation);
+  eepromInitialized = EEPROM.begin(EEPROM_SIZE);
+  if (!eepromInitialized) {
+    Serial.println("EEPROM init failed");
+  }
   initializeRangeIndices();
   radarSweepStart = millis();
   resetRadarContacts();
@@ -1514,6 +1563,7 @@ void rotateRadarOrientation() {
   radarRotationSteps = (radarRotationSteps + 1) % 4;
   compassLabelBoundsValid = false;
   drawRadar();
+  persistSettings();
 }
 
 void handleTouch() {
