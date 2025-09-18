@@ -17,12 +17,14 @@ static const uint16_t COLOR_RADAR_GRID = TFT_DARKGREY;
 static const uint16_t COLOR_RADAR_CONTACT = TFT_GREEN;
 static const uint16_t COLOR_RADAR_INBOUND = TFT_RED;
 static const uint16_t COLOR_RADAR_HOME = TFT_SKYBLUE;
-static const int INFO_TOP_MARGIN = 10;
-static const int INFO_LINE_HEIGHT = 20;
+static const int INFO_TOP_MARGIN = 12;
+static const int INFO_LINE_HEIGHT = 28;
+static const int INFO_TEXT_SIZE = 2;
 static const unsigned long REFRESH_INTERVAL_MS = 5000;
 static const unsigned long WIFI_RETRY_INTERVAL_MS = 15000;
 static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
 static const int RADAR_MARGIN = 12;
+static const int RADAR_TOP_PADDING = 24;
 static const int MAX_RADAR_CONTACTS = 40;
 static const unsigned long RADAR_SWEEP_PERIOD_MS = 4000;
 static const unsigned long RADAR_FADE_DURATION_MS = 4000;
@@ -32,6 +34,8 @@ static const uint16_t COLOR_RADAR_SWEEP = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_ACTIVE = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_INACTIVE = TFT_DARKGREY;
 static const int MAX_INFO_LINES = 12;
+static const int COMPASS_LABEL_OFFSET = 16;
+static const int COMPASS_TEXT_SIZE = 2;
 
 static const int BUTTON_COUNT = 2;
 static const int BUTTON_HEIGHT = 48;
@@ -249,9 +253,9 @@ void drawCompassLabels(GFX &gfx, int centerX, int centerY, int radius) {
     return;
   }
 
-  int labelRadius = max(radius - 12, radius / 2);
+  int labelRadius = radius + COMPASS_LABEL_OFFSET;
   gfx.setTextDatum(MC_DATUM);
-  gfx.setTextSize(1);
+  gfx.setTextSize(COMPASS_TEXT_SIZE);
   gfx.setTextColor(COLOR_RADAR_GRID, COLOR_BACKGROUND);
 
   for (int i = 0; i < 4; ++i) {
@@ -260,6 +264,8 @@ void drawCompassLabels(GFX &gfx, int centerX, int centerY, int radius) {
     int labelY = centerY - (int)round(cos(angleRad) * labelRadius);
     gfx.drawString(labels[i], labelX, labelY);
   }
+
+  gfx.setTextSize(1);
 }
 
 void setup() {
@@ -359,7 +365,7 @@ void setupRadarSprite() {
 
 void drawStaticLayout() {
   tft.fillScreen(COLOR_BACKGROUND);
-  radarAreaY = 0;
+  radarAreaY = RADAR_TOP_PADDING;
   radarAreaHeight = tft.height() / 2;
   int availableRadarHeight = max(radarAreaHeight - RADAR_MARGIN * 2, 0);
   int radarDiameter = min(tft.width() - RADAR_MARGIN * 2, availableRadarHeight);
@@ -410,7 +416,7 @@ void drawInfoLine(int index, const String &text) {
 void updateDisplay() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
-  tft.setTextSize(1);
+  tft.setTextSize(INFO_TEXT_SIZE);
 
   int textAreaHeight = max(buttonAreaY - infoAreaY, 0);
   int availableTextHeight = max(textAreaHeight - INFO_TOP_MARGIN, 0);
@@ -459,9 +465,6 @@ void updateDisplay() {
     appendLine(trafficLine);
   }
 
-  appendLine("Radar range: " + String(currentRadarRangeKm(), 0) + " km");
-  appendLine("Alert range: " + String(currentAlertRangeKm(), 0) + " km");
-
   bool infoChanged = (lineIndex != lastInfoLineCount);
   if (!infoChanged) {
     for (int i = 0; i < lineIndex; ++i) {
@@ -492,6 +495,7 @@ void updateDisplay() {
   tft.setTextPadding(0);
 
   drawRadar();
+  tft.setTextSize(1);
 }
 
 void drawRadar() {
@@ -571,7 +575,6 @@ void drawRadar() {
       radarSprite.fillCircle(contactX, contactY, 3, fadedColor);
     }
 
-    drawCompassLabels(radarSprite, spriteCenter, spriteCenter, radarRadius);
     int spriteX = radarCenterX - radarRadius;
     int spriteY = radarCenterY - radarRadius;
     radarSprite.pushSprite(spriteX, spriteY);
@@ -642,10 +645,11 @@ void drawRadar() {
       tft.fillCircle(contactX, contactY, 3, fadedColor);
     }
 
-    drawCompassLabels(tft, centerX, centerY, radarRadius);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
   }
+
+  drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
 
   drawStatusBar();
 }
