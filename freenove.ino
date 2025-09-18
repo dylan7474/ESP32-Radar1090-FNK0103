@@ -17,8 +17,9 @@ static const uint16_t COLOR_RADAR_GRID = TFT_DARKGREY;
 static const uint16_t COLOR_RADAR_CONTACT = TFT_GREEN;
 static const uint16_t COLOR_RADAR_INBOUND = TFT_RED;
 static const uint16_t COLOR_RADAR_HOME = TFT_SKYBLUE;
-static const int INFO_TOP_MARGIN = 12;
-static const int INFO_LINE_HEIGHT = 28;
+static const uint16_t COLOR_INFO_TABLE_BG = TFT_NAVY;
+static const uint16_t COLOR_INFO_TABLE_HEADER_BG = TFT_BLUE;
+static const uint16_t COLOR_INFO_TABLE_BORDER = TFT_WHITE;
 static const int INFO_TEXT_SIZE = 2;
 static const unsigned long REFRESH_INTERVAL_MS = 5000;
 static const unsigned long WIFI_RETRY_INTERVAL_MS = 15000;
@@ -33,7 +34,9 @@ static const double RADAR_SWEEP_WIDTH_DEG = 3.0;
 static const uint16_t COLOR_RADAR_SWEEP = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_ACTIVE = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_INACTIVE = TFT_DARKGREY;
-static const int MAX_INFO_LINES = 12;
+static const int INFO_TABLE_ROW_HEIGHT = 28;
+static const int INFO_TABLE_HEADER_HEIGHT = 48;
+static const int INFO_TABLE_PADDING = 8;
 static const int COMPASS_LABEL_OFFSET = 16;
 static const int COMPASS_TEXT_SIZE = 2;
 
@@ -140,8 +143,28 @@ struct TouchButton {
 TouchButton buttons[BUTTON_COUNT];
 unsigned long lastTouchTime = 0;
 
-String lastInfoLines[MAX_INFO_LINES];
-int lastInfoLineCount = -1;
+int activeContactIndex = -1;
+bool infoPanelDirty = true;
+
+struct InfoTableRow {
+  String label;
+  String value;
+};
+
+struct InfoPanelCache {
+  bool initialized;
+  int cachedInfoAreaX;
+  int cachedInfoAreaY;
+  int cachedInfoAreaWidth;
+  int cachedTextAreaHeight;
+  int cachedHeaderHeight;
+  int cachedTableTop;
+  int cachedDividerX;
+  int cachedRowCount;
+  InfoTableRow cachedRows[10];
+};
+
+InfoPanelCache infoPanelCache = {};
 
 void drawButtons();
 void resetRadarContacts();
@@ -153,6 +176,10 @@ double currentAlertRangeKm();
 void cycleRadarRange();
 void cycleAlertRange();
 void handleRangeButton(ButtonType type);
+void renderInfoPanel();
+bool setActiveContact(int index);
+bool clearActiveContact();
+bool ensureActiveContactFresh(unsigned long now);
 
 void initializeRangeIndices() {
   radarRangeIndex = 0;
@@ -316,6 +343,10 @@ struct RadarContact {
   double bearing;
   bool inbound;
   String flight;
+  int altitude;
+  double groundSpeed;
+  double track;
+  double minutesToClosest;
   bool valid;
   unsigned long lastHighlightTime;
   bool stale;
@@ -334,7 +365,13 @@ void resetRadarContacts() {
     radarContacts[i].distanceKm = 0.0;
     radarContacts[i].bearing = 0.0;
     radarContacts[i].stale = false;
+    radarContacts[i].altitude = -1;
+    radarContacts[i].groundSpeed = NAN;
+    radarContacts[i].track = NAN;
+    radarContacts[i].minutesToClosest = NAN;
   }
+  activeContactIndex = -1;
+  infoPanelDirty = true;
 }
 
 void setupRadarSprite() {
@@ -388,13 +425,16 @@ void drawStaticLayout() {
   }
 
   tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, infoAreaHeight, COLOR_BACKGROUND);
+  infoPanelCache.initialized = false;
+  infoPanelCache.cachedRowCount = 0;
 
   configureButtons();
   setupRadarSprite();
 
   lastWifiBars = -1;
   lastWifiConnectedState = false;
-  lastInfoLineCount = -1;
+  activeContactIndex = -1;
+  infoPanelDirty = true;
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
@@ -402,100 +442,262 @@ void drawStaticLayout() {
   drawButtons();
 }
 
-void drawInfoLine(int index, const String &text) {
-  int y = infoAreaY + INFO_TOP_MARGIN + index * INFO_LINE_HEIGHT;
-  if (y + INFO_LINE_HEIGHT > buttonAreaY) {
+void renderInfoPanel() {
+  if (!infoPanelDirty) {
     return;
   }
-  String content = text.length() ? text : " ";
-  int padding = max(infoAreaWidth - 8, 0);
-  tft.setTextPadding(padding);
-  tft.drawString(content, infoAreaX + 4, y);
-}
-
-void updateDisplay() {
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
-  tft.setTextSize(INFO_TEXT_SIZE);
 
   int textAreaHeight = max(buttonAreaY - infoAreaY, 0);
-  int availableTextHeight = max(textAreaHeight - INFO_TOP_MARGIN, 0);
-  int maxLines = INFO_LINE_HEIGHT > 0 ? availableTextHeight / INFO_LINE_HEIGHT : 0;
-  int lineCapacity = min(maxLines, MAX_INFO_LINES);
+  if (textAreaHeight <= 0 || infoAreaWidth <= 0) {
+    infoPanelDirty = false;
+    return;
+  }
 
-  String infoLines[MAX_INFO_LINES];
-  int lineIndex = 0;
-  auto appendLine = [&](const String &line) {
-    if (lineIndex < lineCapacity) {
-      infoLines[lineIndex++] = line.length() ? line : String(" ");
+  tft.setTextSize(INFO_TEXT_SIZE);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextPadding(0);
+
+  const RadarContact *activeContact = nullptr;
+  if (activeContactIndex >= 0 && activeContactIndex < radarContactCount) {
+    RadarContact &candidate = radarContacts[activeContactIndex];
+    unsigned long now = millis();
+    if (candidate.valid && candidate.lastHighlightTime != 0 && (now - candidate.lastHighlightTime) <= RADAR_FADE_DURATION_MS) {
+      activeContact = &candidate;
+    }
+  }
+
+  InfoTableRow rows[10];
+  int rowCount = 0;
+  auto addRow = [&](const String &label, const String &value) {
+    if (rowCount < (int)(sizeof(rows) / sizeof(rows[0]))) {
+      rows[rowCount].label = label;
+      rows[rowCount].value = value;
+      ++rowCount;
     }
   };
 
-  if (closestAircraft.valid) {
-    String flight = closestAircraft.flight.length() ? closestAircraft.flight : String("(unknown)");
+  if (activeContact != nullptr) {
+    String flight = activeContact->flight;
     flight.trim();
-    String header = "Flight " + flight;
-    if (closestAircraft.inbound) {
-      header += "  ALERT";
+    if (!flight.length()) {
+      flight = String("(Unknown)");
     }
-    appendLine(header);
-
-    appendLine("Distance: " + String(closestAircraft.distanceKm, 1) + " km");
-
-    if (closestAircraft.altitude >= 0) {
-      appendLine("Altitude: " + String(closestAircraft.altitude) + " ft");
+    addRow("Flight", flight);
+    String speedValue = "--";
+    if (!isnan(activeContact->groundSpeed) && activeContact->groundSpeed >= 0) {
+      speedValue = String(activeContact->groundSpeed, 0) + " kt";
     }
-
+    addRow("Speed", speedValue);
+    addRow("Distance", String(activeContact->distanceKm, 1) + " km");
+    String altitudeValue = "--";
+    if (activeContact->altitude >= 0) {
+      altitudeValue = String(activeContact->altitude) + " ft";
+    }
+    addRow("Altitude", altitudeValue);
+    addRow("Bearing", String(activeContact->bearing, 0) + " deg");
+    if (!isnan(activeContact->track)) {
+      addRow("Track", String(activeContact->track, 0) + " deg");
+    }
+    if (activeContact->inbound) {
+      if (!isnan(activeContact->minutesToClosest) && activeContact->minutesToClosest >= 0) {
+        addRow("ETA", String(activeContact->minutesToClosest, 1) + " min");
+      } else {
+        addRow("ETA", "Approaching");
+      }
+    }
+  } else if (closestAircraft.valid) {
+    String flight = closestAircraft.flight;
+    flight.trim();
+    if (!flight.length()) {
+      flight = String("(unknown)");
+    }
+    addRow("Flight", flight);
+    String speedValue = "--";
     if (!isnan(closestAircraft.groundSpeed) && closestAircraft.groundSpeed >= 0) {
-      appendLine("Speed: " + String(closestAircraft.groundSpeed, 0) + " kt");
+      speedValue = String(closestAircraft.groundSpeed, 0) + " kt";
     }
-
+    addRow("Speed", speedValue);
+    addRow("Distance", String(closestAircraft.distanceKm, 1) + " km");
+    String altitudeValue = "--";
+    if (closestAircraft.altitude >= 0) {
+      altitudeValue = String(closestAircraft.altitude) + " ft";
+    }
+    addRow("Altitude", altitudeValue);
+    addRow("Bearing", String(closestAircraft.bearing, 0) + " deg");
+    if (!isnan(closestAircraft.track)) {
+      addRow("Track", String(closestAircraft.track, 0) + " deg");
+    }
     if (closestAircraft.inbound && !isnan(closestAircraft.minutesToClosest) && closestAircraft.minutesToClosest >= 0) {
-      appendLine("ETA: " + String(closestAircraft.minutesToClosest, 1) + " min");
+      addRow("ETA", String(closestAircraft.minutesToClosest, 1) + " min");
     }
   } else {
-    appendLine("No aircraft in range");
+    String statusMessage = dataConnectionOk ? String("Waiting for traffic") : String("Awaiting data link");
+    addRow("Flight", statusMessage);
+    addRow("Speed", "--");
+    addRow("Distance", "--");
+    addRow("Altitude", "--");
   }
 
   if (aircraftCount > 0) {
-    String trafficLine = "Traffic: " + String(aircraftCount);
+    String traffic = String(aircraftCount) + " tracked";
     if (inboundAircraftCount > 0) {
-      trafficLine += " (" + String(inboundAircraftCount) + " in)";
+      traffic += " / " + String(inboundAircraftCount) + " inbound";
     }
-    appendLine(trafficLine);
+    addRow("Traffic", traffic);
   }
 
-  bool infoChanged = (lineIndex != lastInfoLineCount);
-  if (!infoChanged) {
-    for (int i = 0; i < lineIndex; ++i) {
-      if (infoLines[i] != lastInfoLines[i]) {
-        infoChanged = true;
-        break;
+  int headerHeight = 0;
+  int availableHeight = textAreaHeight;
+  int maxRows = INFO_TABLE_ROW_HEIGHT > 0 ? availableHeight / INFO_TABLE_ROW_HEIGHT : 0;
+  if (maxRows < rowCount) {
+    rowCount = maxRows;
+  }
+
+  int tableTop = infoAreaY + headerHeight;
+  int dividerX = infoAreaX + infoAreaWidth / 2;
+
+  bool geometryChanged = !infoPanelCache.initialized || infoPanelCache.cachedInfoAreaX != infoAreaX ||
+                         infoPanelCache.cachedInfoAreaY != infoAreaY ||
+                         infoPanelCache.cachedInfoAreaWidth != infoAreaWidth ||
+                         infoPanelCache.cachedTextAreaHeight != textAreaHeight;
+
+  bool rowStructureChanged = geometryChanged || infoPanelCache.cachedHeaderHeight != headerHeight ||
+                             infoPanelCache.cachedRowCount != rowCount;
+
+  if (rowStructureChanged) {
+    tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_INFO_TABLE_BG);
+    tft.drawRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_INFO_TABLE_BORDER);
+
+    if (rowCount > 0) {
+      int tableHeight = rowCount * INFO_TABLE_ROW_HEIGHT;
+      tft.drawFastVLine(dividerX, tableTop, tableHeight, COLOR_INFO_TABLE_BORDER);
+      for (int i = 0; i < rowCount; ++i) {
+        int rowY = tableTop + i * INFO_TABLE_ROW_HEIGHT;
+        tft.drawFastHLine(infoAreaX, rowY, infoAreaWidth, COLOR_INFO_TABLE_BORDER);
+      }
+      tft.drawFastHLine(infoAreaX, tableTop + rowCount * INFO_TABLE_ROW_HEIGHT, infoAreaWidth, COLOR_INFO_TABLE_BORDER);
+    }
+  }
+
+  int textHeight = INFO_TEXT_SIZE * 8;
+  int rowsToProcess = max(rowCount, infoPanelCache.cachedRowCount);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COLOR_TEXT, COLOR_INFO_TABLE_BG);
+  for (int i = 0; i < rowsToProcess; ++i) {
+    bool rowExists = i < rowCount;
+    bool hadRow = i < infoPanelCache.cachedRowCount;
+    bool rowChanged = rowStructureChanged || (rowExists && (!hadRow || rows[i].label != infoPanelCache.cachedRows[i].label ||
+                                                           rows[i].value != infoPanelCache.cachedRows[i].value)) ||
+                      (!rowExists && hadRow);
+    if (!rowChanged) {
+      continue;
+    }
+
+    int rowY = tableTop + i * INFO_TABLE_ROW_HEIGHT;
+    int rowFillY = rowY + 1;
+    int rowFillH = max(INFO_TABLE_ROW_HEIGHT - 1, 0);
+    if (rowFillH > 0) {
+      int labelFillX = infoAreaX + 1;
+      int labelFillW = max(dividerX - labelFillX - 1, 0);
+      if (labelFillW > 0) {
+        tft.fillRect(labelFillX, rowFillY, labelFillW, rowFillH, COLOR_INFO_TABLE_BG);
+      }
+      int valueFillX = dividerX + 1;
+      int valueFillW = max(infoAreaX + infoAreaWidth - 1 - valueFillX, 0);
+      if (valueFillW > 0) {
+        tft.fillRect(valueFillX, rowFillY, valueFillW, rowFillH, COLOR_INFO_TABLE_BG);
       }
     }
-  }
 
-  if (infoChanged) {
-    if (textAreaHeight > 0 && infoAreaWidth > 0) {
-      tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_BACKGROUND);
+    if (rowExists) {
+      int textY = rowY + max((INFO_TABLE_ROW_HEIGHT - textHeight) / 2, 0);
+      int labelWidth = dividerX - infoAreaX - INFO_TABLE_PADDING * 2;
+      if (labelWidth < 0) {
+        labelWidth = 0;
+      }
+      int valueWidth = infoAreaX + infoAreaWidth - dividerX - INFO_TABLE_PADDING * 2;
+      if (valueWidth < 0) {
+        valueWidth = 0;
+      }
+      tft.setTextPadding(labelWidth);
+      tft.drawString(rows[i].label, infoAreaX + INFO_TABLE_PADDING, textY);
+      tft.setTextPadding(valueWidth);
+      tft.drawString(rows[i].value, dividerX + INFO_TABLE_PADDING, textY);
     }
-
-    int padding = max(infoAreaWidth - 8, 0);
-    tft.setTextPadding(padding);
-    for (int i = 0; i < lineIndex; ++i) {
-      drawInfoLine(i, infoLines[i]);
-      lastInfoLines[i] = infoLines[i];
-    }
-    for (int i = lineIndex; i < MAX_INFO_LINES; ++i) {
-      lastInfoLines[i] = "";
-    }
-    lastInfoLineCount = lineIndex;
   }
 
   tft.setTextPadding(0);
+  tft.setTextDatum(TL_DATUM);
 
+  infoPanelCache.initialized = true;
+  infoPanelCache.cachedInfoAreaX = infoAreaX;
+  infoPanelCache.cachedInfoAreaY = infoAreaY;
+  infoPanelCache.cachedInfoAreaWidth = infoAreaWidth;
+  infoPanelCache.cachedTextAreaHeight = textAreaHeight;
+  infoPanelCache.cachedHeaderHeight = headerHeight;
+  infoPanelCache.cachedTableTop = tableTop;
+  infoPanelCache.cachedDividerX = dividerX;
+  infoPanelCache.cachedRowCount = rowCount;
+  for (int i = 0; i < rowCount; ++i) {
+    infoPanelCache.cachedRows[i] = rows[i];
+  }
+  for (int i = rowCount; i < (int)(sizeof(infoPanelCache.cachedRows) / sizeof(infoPanelCache.cachedRows[0])); ++i) {
+    infoPanelCache.cachedRows[i].label = "";
+    infoPanelCache.cachedRows[i].value = "";
+  }
+
+  infoPanelDirty = false;
+}
+
+void updateDisplay() {
+  infoPanelDirty = true;
+  renderInfoPanel();
   drawRadar();
   tft.setTextSize(1);
+}
+
+bool setActiveContact(int index) {
+  if (index < 0 || index >= radarContactCount) {
+    return clearActiveContact();
+  }
+
+  RadarContact &contact = radarContacts[index];
+  if (!contact.valid) {
+    return clearActiveContact();
+  }
+
+  if (activeContactIndex != index) {
+    activeContactIndex = index;
+    infoPanelDirty = true;
+    return true;
+  }
+
+  return false;
+}
+
+bool clearActiveContact() {
+  if (activeContactIndex >= 0) {
+    activeContactIndex = -1;
+    infoPanelDirty = true;
+    return true;
+  }
+  return false;
+}
+
+bool ensureActiveContactFresh(unsigned long now) {
+  if (activeContactIndex < 0) {
+    return false;
+  }
+  if (activeContactIndex >= radarContactCount) {
+    return clearActiveContact();
+  }
+
+  RadarContact &contact = radarContacts[activeContactIndex];
+  if (!contact.valid || contact.lastHighlightTime == 0 || (now - contact.lastHighlightTime) > RADAR_FADE_DURATION_MS) {
+    return clearActiveContact();
+  }
+
+  return false;
 }
 
 void drawRadar() {
@@ -510,6 +712,11 @@ void drawRadar() {
     return;
   }
 
+  if (infoPanelDirty) {
+    renderInfoPanel();
+  }
+
+  bool highlightChanged = false;
   unsigned long sweepElapsed = (now - radarSweepStart) % RADAR_SWEEP_PERIOD_MS;
   double sweepProgress = (double)sweepElapsed / (double)RADAR_SWEEP_PERIOD_MS;
   double sweepAngle = sweepProgress * 360.0;
@@ -550,6 +757,9 @@ void drawRadar() {
       double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
       if (!radarContacts[i].stale && angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
         radarContacts[i].lastHighlightTime = now;
+        if (setActiveContact(i)) {
+          highlightChanged = true;
+        }
       }
 
       if (radarContacts[i].lastHighlightTime == 0) {
@@ -620,6 +830,9 @@ void drawRadar() {
       double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
       if (!radarContacts[i].stale && angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
         radarContacts[i].lastHighlightTime = now;
+        if (setActiveContact(i)) {
+          highlightChanged = true;
+        }
       }
 
       if (radarContacts[i].lastHighlightTime == 0) {
@@ -645,6 +858,11 @@ void drawRadar() {
       tft.fillCircle(contactX, contactY, 3, fadedColor);
     }
 
+  }
+
+  bool cleared = ensureActiveContactFresh(now);
+  if (highlightChanged || cleared) {
+    renderInfoPanel();
   }
 
   drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius);
@@ -727,6 +945,7 @@ void fetchAircraft() {
       RadarContact previousContacts[MAX_RADAR_CONTACTS];
       bool previousMatched[MAX_RADAR_CONTACTS];
       int previousCount = radarContactCount;
+      int previousActiveIndex = activeContactIndex;
       for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
         previousContacts[i] = radarContacts[i];
         previousMatched[i] = false;
@@ -809,6 +1028,19 @@ void fetchAircraft() {
           }
         }
 
+        int altitude = -1;
+        if (plane.containsKey("alt_baro")) {
+          JsonVariant alt = plane["alt_baro"];
+          if (alt.is<int>()) {
+            altitude = alt.as<int>();
+          } else if (alt.is<const char*>()) {
+            const char *altStr = alt.as<const char*>();
+            if (altStr != nullptr && strcmp(altStr, "ground") == 0) {
+              altitude = 0;
+            }
+          }
+        }
+
         int matchIndex = -1;
         if (previousCount > 0) {
           if (flight.length() > 0) {
@@ -851,12 +1083,19 @@ void fetchAircraft() {
           contact.valid = true;
           contact.stale = false;
           contact.lastHighlightTime = 0;
+          contact.altitude = altitude;
+          contact.groundSpeed = groundSpeed;
+          contact.track = track;
+          contact.minutesToClosest = minutesToClosest;
           if (matchIndex >= 0) {
             unsigned long previousHighlight = previousContacts[matchIndex].lastHighlightTime;
             if (previousHighlight != 0 && (fetchTime - previousHighlight) < RADAR_FADE_DURATION_MS) {
               contact.lastHighlightTime = previousHighlight;
             }
             previousMatched[matchIndex] = true;
+            if (matchIndex == previousActiveIndex && contact.lastHighlightTime != 0) {
+              setActiveContact(radarContactCount - 1);
+            }
           }
           contact.flight = flight;
         }
@@ -878,18 +1117,7 @@ void fetchAircraft() {
             best.flight = "";
           }
 
-          if (plane.containsKey("alt_baro")) {
-            JsonVariant alt = plane["alt_baro"];
-            if (alt.is<int>()) {
-              best.altitude = alt.as<int>();
-            } else if (alt.is<const char*>() && strcmp(alt.as<const char*>(), "ground") == 0) {
-              best.altitude = 0;
-            } else {
-              best.altitude = -1;
-            }
-          } else {
-            best.altitude = -1;
-          }
+          best.altitude = altitude;
         }
       }
 
@@ -905,6 +1133,9 @@ void fetchAircraft() {
         contact = previousContacts[i];
         contact.valid = true;
         contact.stale = true;
+        if (i == previousActiveIndex && contact.lastHighlightTime != 0) {
+          setActiveContact(radarContactCount - 1);
+        }
       }
 
       closestAircraft = best;
