@@ -13,6 +13,10 @@
 static const uint16_t COLOR_BACKGROUND = TFT_BLACK;
 static const uint16_t COLOR_TEXT = TFT_WHITE;
 static const uint16_t COLOR_RADAR_OUTLINE = TFT_DARKGREEN;
+static const uint16_t COLOR_RADAR_GRID = TFT_DARKGREY;
+static const uint16_t COLOR_RADAR_CONTACT = TFT_GREEN;
+static const uint16_t COLOR_RADAR_INBOUND = TFT_RED;
+static const uint16_t COLOR_RADAR_HOME = TFT_SKYBLUE;
 static const int INFO_START_Y = 58;
 static const int INFO_LINE_HEIGHT = 26;
 static const unsigned long REFRESH_INTERVAL_MS = 5000;
@@ -21,6 +25,8 @@ static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
 static const double INBOUND_ALERT_DISTANCE_KM = 5.0;
 static const int RADAR_RADIUS = 48;
 static const int RADAR_MARGIN = 12;
+static const double RADAR_MAX_RANGE_KM = 60.0;
+static const int MAX_RADAR_CONTACTS = 40;
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -49,7 +55,8 @@ void drawStaticLayout();
 void updateDisplay();
 void drawInfoLine(int index, const String &text);
 void drawStatusLine(int index, const String &text);
-void drawRadarPlaceholder();
+void drawRadar();
+void resetRadarContacts();
 void connectWiFi();
 void fetchAircraft();
 double haversine(double lat1, double lon1, double lat2, double lon2);
@@ -63,6 +70,7 @@ void setup() {
   Serial.begin(115200);
   tft.begin();
   tft.setRotation(1);
+  resetRadarContacts();
   drawStaticLayout();
 
   closestAircraft.valid = false;
@@ -92,6 +100,25 @@ void loop() {
   delay(50);
 }
 
+struct RadarContact {
+  double distanceKm;
+  double bearing;
+  bool inbound;
+  String flight;
+  bool valid;
+};
+
+RadarContact radarContacts[MAX_RADAR_CONTACTS];
+int radarContactCount = 0;
+
+void resetRadarContacts() {
+  radarContactCount = 0;
+  for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
+    radarContacts[i].valid = false;
+    radarContacts[i].flight = "";
+  }
+}
+
 void drawStaticLayout() {
   tft.fillScreen(COLOR_BACKGROUND);
   tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
@@ -104,7 +131,7 @@ void drawStaticLayout() {
   tft.drawFastHLine(0, 54, tft.width(), TFT_DARKGREY);
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(2);
-  drawRadarPlaceholder();
+  drawRadar();
 }
 
 void drawInfoLine(int index, const String &text) {
@@ -194,16 +221,42 @@ void updateDisplay() {
   drawStatusLine(3, updateLine);
 
   tft.setTextPadding(0);
-  drawRadarPlaceholder();
+  drawRadar();
 }
 
-void drawRadarPlaceholder() {
+void drawRadar() {
   int centerX = tft.width() - RADAR_MARGIN - RADAR_RADIUS;
   int centerY = tft.height() - RADAR_MARGIN - RADAR_RADIUS;
 
   tft.fillCircle(centerX, centerY, RADAR_RADIUS, COLOR_BACKGROUND);
   tft.drawCircle(centerX, centerY, RADAR_RADIUS, COLOR_RADAR_OUTLINE);
   tft.drawCircle(centerX, centerY, RADAR_RADIUS / 2, COLOR_RADAR_OUTLINE);
+
+  tft.drawFastHLine(centerX - RADAR_RADIUS, centerY, RADAR_RADIUS * 2, COLOR_RADAR_GRID);
+  tft.drawFastVLine(centerX, centerY - RADAR_RADIUS, RADAR_RADIUS * 2, COLOR_RADAR_GRID);
+
+  tft.fillCircle(centerX, centerY, 3, COLOR_RADAR_HOME);
+
+  for (int i = 0; i < radarContactCount; ++i) {
+    if (!radarContacts[i].valid) {
+      continue;
+    }
+
+    double normalized = radarContacts[i].distanceKm / RADAR_MAX_RANGE_KM;
+    if (normalized > 1.0) {
+      normalized = 1.0;
+    } else if (normalized < 0.0 || isnan(normalized)) {
+      continue;
+    }
+
+    double angleRad = deg2rad(radarContacts[i].bearing);
+    double radius = normalized * (RADAR_RADIUS - 3);
+    int contactX = centerX + (int)round(sin(angleRad) * radius);
+    int contactY = centerY - (int)round(cos(angleRad) * radius);
+
+    uint16_t color = radarContacts[i].inbound ? COLOR_RADAR_INBOUND : COLOR_RADAR_CONTACT;
+    tft.fillCircle(contactX, contactY, 3, color);
+  }
 }
 
 void connectWiFi() {
@@ -232,6 +285,7 @@ void fetchAircraft() {
     dataConnectionOk = false;
     closestAircraft.valid = false;
     aircraftCount = 0;
+    resetRadarContacts();
     updateDisplay();
     return;
   }
@@ -244,6 +298,7 @@ void fetchAircraft() {
     dataConnectionOk = false;
     closestAircraft.valid = false;
     aircraftCount = 0;
+    resetRadarContacts();
     updateDisplay();
     return;
   }
@@ -265,6 +320,7 @@ void fetchAircraft() {
       best.minutesToClosest = NAN;
       best.inbound = false;
       aircraftCount = 0;
+      resetRadarContacts();
       int localInboundCount = 0;
 
       for (JsonObject plane : arr) {
@@ -322,6 +378,20 @@ void fetchAircraft() {
           localInboundCount++;
         }
 
+        if (radarContactCount < MAX_RADAR_CONTACTS) {
+          RadarContact &contact = radarContacts[radarContactCount++];
+          contact.distanceKm = distance;
+          contact.bearing = bearingToHome;
+          contact.inbound = inbound;
+          contact.valid = true;
+          if (plane.containsKey("flight")) {
+            const char *flightStr = plane["flight"].as<const char*>();
+            contact.flight = flightStr ? String(flightStr) : String();
+          } else {
+            contact.flight = "";
+          }
+        }
+
         if (distance < bestDistance) {
           bestDistance = distance;
           best.valid = true;
@@ -364,12 +434,14 @@ void fetchAircraft() {
       closestAircraft.valid = false;
       aircraftCount = 0;
       inboundAircraftCount = 0;
+      resetRadarContacts();
     }
   } else {
     dataConnectionOk = false;
     closestAircraft.valid = false;
     aircraftCount = 0;
     inboundAircraftCount = 0;
+    resetRadarContacts();
   }
 
   http.end();
