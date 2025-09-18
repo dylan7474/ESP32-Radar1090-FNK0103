@@ -78,6 +78,8 @@ static const int ALERT_RANGE_OPTION_COUNT = sizeof(ALERT_RANGE_OPTIONS_KM) / siz
 static const double DEFAULT_RADAR_RANGE_KM = 25.0;
 static const double DEFAULT_ALERT_RANGE_KM = 5.0;
 
+static const int COMPASS_LABEL_COUNT = 4;
+
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite radarSprite = TFT_eSprite(&tft);
 
@@ -124,6 +126,9 @@ int infoAreaWidth = 0;
 int infoAreaHeight = 0;
 int buttonAreaY = 0;
 
+uint8_t displayRotation = 0;
+uint8_t radarRotationSteps = 0;
+
 enum ButtonType {
   BUTTON_RADAR_RANGE,
   BUTTON_ALERT_RANGE,
@@ -165,6 +170,17 @@ struct InfoPanelCache {
 };
 
 InfoPanelCache infoPanelCache = {};
+
+struct CompassLabelBounds {
+  const char *label;
+  int x;
+  int y;
+  int w;
+  int h;
+};
+
+CompassLabelBounds compassLabelBounds[COMPASS_LABEL_COUNT];
+bool compassLabelBoundsValid = false;
 
 void drawButtons();
 void resetRadarContacts();
@@ -271,11 +287,13 @@ void drawButtons();
 void drawButton(int index);
 bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
+void rotateRadarOrientation();
 
 template <typename GFX>
-void drawCompassLabels(GFX &gfx, int centerX, int centerY, int radius) {
+void drawCompassLabels(GFX &gfx, int centerX, int centerY, int radius, double rotationOffsetDeg) {
   static const char *const labels[] = {"N", "E", "S", "W"};
   static const double angles[] = {0.0, 90.0, 180.0, 270.0};
+  compassLabelBoundsValid = false;
   if (radius <= 0) {
     return;
   }
@@ -285,20 +303,56 @@ void drawCompassLabels(GFX &gfx, int centerX, int centerY, int radius) {
   gfx.setTextSize(COMPASS_TEXT_SIZE);
   gfx.setTextColor(COLOR_RADAR_GRID, COLOR_BACKGROUND);
 
-  for (int i = 0; i < 4; ++i) {
-    double angleRad = deg2rad(angles[i]);
+  for (int i = 0; i < COMPASS_LABEL_COUNT; ++i) {
+    double angleRad = deg2rad(angles[i] + rotationOffsetDeg);
     int labelX = centerX + (int)round(sin(angleRad) * labelRadius);
     int labelY = centerY - (int)round(cos(angleRad) * labelRadius);
     gfx.drawString(labels[i], labelX, labelY);
+
+    int textWidth = gfx.textWidth(labels[i]);
+    if (textWidth <= 0) {
+      textWidth = COMPASS_TEXT_SIZE * 6;
+    }
+    int textHeight = COMPASS_TEXT_SIZE * 8;
+    int halfWidth = max(textWidth / 2, 1);
+    int halfHeight = max(textHeight / 2, 1);
+
+    compassLabelBounds[i].label = labels[i];
+    compassLabelBounds[i].x = labelX - halfWidth;
+    compassLabelBounds[i].y = labelY - halfHeight;
+    compassLabelBounds[i].w = max(textWidth, 1);
+    compassLabelBounds[i].h = max(textHeight, 1);
   }
 
+  compassLabelBoundsValid = true;
   gfx.setTextSize(1);
+}
+
+template <typename GFX>
+void drawRadarCross(GFX &gfx, int centerX, int centerY, int radius, uint16_t color, double rotationOffsetDeg) {
+  if (radius <= 0) {
+    return;
+  }
+
+  static const double baseAngles[] = {0.0, 90.0};
+  for (double baseAngle : baseAngles) {
+    double angleRad = deg2rad(baseAngle + rotationOffsetDeg);
+    double oppositeRad = angleRad + PI;
+
+    int x1 = centerX + (int)round(sin(angleRad) * radius);
+    int y1 = centerY - (int)round(cos(angleRad) * radius);
+    int x2 = centerX + (int)round(sin(oppositeRad) * radius);
+    int y2 = centerY - (int)round(cos(oppositeRad) * radius);
+
+    gfx.drawLine(x1, y1, x2, y2, color);
+  }
 }
 
 void setup() {
   Serial.begin(115200);
   tft.begin();
-  tft.setRotation(0);
+  displayRotation = 0;
+  tft.setRotation(displayRotation);
   initializeRangeIndices();
   radarSweepStart = millis();
   resetRadarContacts();
@@ -703,6 +757,7 @@ bool ensureActiveContactFresh(unsigned long now) {
 void drawRadar() {
   unsigned long now = millis();
   lastRadarFrameTime = now;
+  compassLabelBoundsValid = false;
   if (radarRadius <= 0) {
     return;
   }
@@ -720,7 +775,9 @@ void drawRadar() {
   unsigned long sweepElapsed = (now - radarSweepStart) % RADAR_SWEEP_PERIOD_MS;
   double sweepProgress = (double)sweepElapsed / (double)RADAR_SWEEP_PERIOD_MS;
   double sweepAngle = sweepProgress * 360.0;
-  double sweepRad = deg2rad(sweepAngle);
+  double rotationOffsetDeg = radarRotationSteps * 90.0;
+  double displaySweepAngle = fmod(sweepAngle + rotationOffsetDeg, 360.0);
+  double sweepRad = deg2rad(displaySweepAngle);
   bool flashOn = ((now / 400) % 2) == 0;
 
   if (radarSpriteActive) {
@@ -729,8 +786,7 @@ void drawRadar() {
 
     radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_OUTLINE);
     radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius / 2, COLOR_RADAR_OUTLINE);
-    radarSprite.drawFastHLine(spriteCenter - radarRadius, spriteCenter, radarRadius * 2, COLOR_RADAR_GRID);
-    radarSprite.drawFastVLine(spriteCenter, spriteCenter - radarRadius, radarRadius * 2, COLOR_RADAR_GRID);
+    drawRadarCross(radarSprite, spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_GRID, rotationOffsetDeg);
     radarSprite.fillCircle(spriteCenter, spriteCenter, 3, COLOR_RADAR_HOME);
 
     int sweepX = spriteCenter + (int)round(sin(sweepRad) * (radarRadius - 1));
@@ -749,7 +805,7 @@ void drawRadar() {
         continue;
       }
 
-      double angleRad = deg2rad(radarContacts[i].bearing);
+      double angleRad = deg2rad(radarContacts[i].bearing + rotationOffsetDeg);
       double radius = normalized * (radarRadius - 3);
       int contactX = spriteCenter + (int)round(sin(angleRad) * radius);
       int contactY = spriteCenter - (int)round(cos(angleRad) * radius);
@@ -801,9 +857,7 @@ void drawRadar() {
     tft.fillCircle(centerX, centerY, radarRadius, COLOR_BACKGROUND);
     tft.drawCircle(centerX, centerY, radarRadius, COLOR_RADAR_OUTLINE);
     tft.drawCircle(centerX, centerY, radarRadius / 2, COLOR_RADAR_OUTLINE);
-
-    tft.drawFastHLine(centerX - radarRadius, centerY, radarRadius * 2, COLOR_RADAR_GRID);
-    tft.drawFastVLine(centerX, centerY - radarRadius, radarRadius * 2, COLOR_RADAR_GRID);
+    drawRadarCross(tft, centerX, centerY, radarRadius, COLOR_RADAR_GRID, rotationOffsetDeg);
     tft.fillCircle(centerX, centerY, 3, COLOR_RADAR_HOME);
 
     int sweepX = centerX + (int)round(sin(sweepRad) * (radarRadius - 1));
@@ -822,7 +876,7 @@ void drawRadar() {
         continue;
       }
 
-      double angleRad = deg2rad(radarContacts[i].bearing);
+      double angleRad = deg2rad(radarContacts[i].bearing + rotationOffsetDeg);
       double radius = normalized * (radarRadius - 3);
       int contactX = centerX + (int)round(sin(angleRad) * radius);
       int contactY = centerY - (int)round(cos(angleRad) * radius);
@@ -865,7 +919,7 @@ void drawRadar() {
     renderInfoPanel();
   }
 
-  drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius);
+  drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
 
@@ -1401,6 +1455,12 @@ bool readTouchPoint(int &screenX, int &screenY) {
   return true;
 }
 
+void rotateRadarOrientation() {
+  radarRotationSteps = (radarRotationSteps + 1) % 4;
+  compassLabelBoundsValid = false;
+  drawRadar();
+}
+
 void handleTouch() {
   int touchX = 0;
   int touchY = 0;
@@ -1414,11 +1474,24 @@ void handleTouch() {
   }
   lastTouchTime = now;
 
+  bool handled = false;
   for (int i = 0; i < BUTTON_COUNT; ++i) {
     TouchButton &btn = buttons[i];
     if (touchX >= btn.x && touchX <= btn.x + btn.w && touchY >= btn.y && touchY <= btn.y + btn.h) {
       handleRangeButton(btn.type);
+      handled = true;
       break;
+    }
+  }
+
+  if (!handled && radarRadius > 0) {
+    long dx = (long)touchX - (long)radarCenterX;
+    long dy = (long)touchY - (long)radarCenterY;
+    long distanceSquared = dx * dx + dy * dy;
+    long radiusSquared = (long)radarRadius * (long)radarRadius;
+    if (distanceSquared <= radiusSquared) {
+      rotateRadarOrientation();
+      return;
     }
   }
   tft.setTextDatum(TL_DATUM);
