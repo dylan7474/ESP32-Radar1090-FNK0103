@@ -1,4 +1,4 @@
-# ClosestPlane ESP32
+# ESP32-Radar1090-FNK0103
 
 An Arduino-compatible sketch for the Freenove ESP32 4.0" display board (FNK0103) that connects to a dump1090 server and renders a touch-driven radar status panel on the integrated TFT. The sweeping radar visualisation lists the closest aircraft, highlights inbound traffic, and summarises flight details so you can keep an eye on nearby traffic at a glance.
 
@@ -126,5 +126,6 @@ echo "   arduino-cli compile --fqbn esp32:esp32:esp32 sketches/freenove"
 The command completes successfully when the required libraries (`ArduinoJson`, `TFT_eSPI`, etc.) are installed. A thin wrapper
 sketch lives in `sketches/freenove` so that `arduino-cli` sees a folder/file pair with matching names while still keeping the
 primary source at the repository root for IDE users.
+
 
 
