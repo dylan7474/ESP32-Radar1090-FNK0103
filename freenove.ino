@@ -241,6 +241,27 @@ void drawButton(int index);
 bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 
+template <typename GFX>
+void drawCompassLabels(GFX &gfx, int centerX, int centerY, int radius) {
+  static const char *const labels[] = {"N", "E", "S", "W"};
+  static const double angles[] = {0.0, 90.0, 180.0, 270.0};
+  if (radius <= 0) {
+    return;
+  }
+
+  int labelRadius = max(radius - 12, radius / 2);
+  gfx.setTextDatum(MC_DATUM);
+  gfx.setTextSize(1);
+  gfx.setTextColor(COLOR_RADAR_GRID, COLOR_BACKGROUND);
+
+  for (int i = 0; i < 4; ++i) {
+    double angleRad = deg2rad(angles[i]);
+    int labelX = centerX + (int)round(sin(angleRad) * labelRadius);
+    int labelY = centerY - (int)round(cos(angleRad) * labelRadius);
+    gfx.drawString(labels[i], labelX, labelY);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   tft.begin();
@@ -542,6 +563,7 @@ void drawRadar() {
       radarSprite.fillCircle(contactX, contactY, 3, fadedColor);
     }
 
+    drawCompassLabels(radarSprite, spriteCenter, spriteCenter, radarRadius);
     int spriteX = radarCenterX - radarRadius;
     int spriteY = radarCenterY - radarRadius;
     radarSprite.pushSprite(spriteX, spriteY);
@@ -605,6 +627,10 @@ void drawRadar() {
       uint16_t fadedColor = fadeColor(baseColor, alpha);
       tft.fillCircle(contactX, contactY, 3, fadedColor);
     }
+
+    drawCompassLabels(tft, centerX, centerY, radarRadius);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
   }
 
   drawStatusBar();
