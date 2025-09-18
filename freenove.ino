@@ -161,8 +161,6 @@ struct InfoPanelCache {
   int cachedTableTop;
   int cachedDividerX;
   int cachedRowCount;
-  String cachedHeaderTitle;
-  String cachedHeaderSubtitle;
   InfoTableRow cachedRows[10];
 };
 
@@ -429,8 +427,6 @@ void drawStaticLayout() {
   tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, infoAreaHeight, COLOR_BACKGROUND);
   infoPanelCache.initialized = false;
   infoPanelCache.cachedRowCount = 0;
-  infoPanelCache.cachedHeaderTitle = "";
-  infoPanelCache.cachedHeaderSubtitle = "";
 
   configureButtons();
   setupRadarSprite();
@@ -480,18 +476,12 @@ void renderInfoPanel() {
     }
   };
 
-  String headerTitle;
-  String headerSubtitle;
-
   if (activeContact != nullptr) {
     String flight = activeContact->flight;
     flight.trim();
     if (!flight.length()) {
       flight = String("(Unknown)");
     }
-    headerTitle = "Active target";
-    headerSubtitle = "";
-
     addRow("Flight", flight);
     String speedValue = "--";
     if (!isnan(activeContact->groundSpeed) && activeContact->groundSpeed >= 0) {
@@ -499,9 +489,11 @@ void renderInfoPanel() {
     }
     addRow("Speed", speedValue);
     addRow("Distance", String(activeContact->distanceKm, 1) + " km");
+    String altitudeValue = "--";
     if (activeContact->altitude >= 0) {
-      addRow("Altitude", String(activeContact->altitude) + " ft");
+      altitudeValue = String(activeContact->altitude) + " ft";
     }
+    addRow("Altitude", altitudeValue);
     addRow("Bearing", String(activeContact->bearing, 0) + " deg");
     if (!isnan(activeContact->track)) {
       addRow("Track", String(activeContact->track, 0) + " deg");
@@ -519,9 +511,6 @@ void renderInfoPanel() {
     if (!flight.length()) {
       flight = String("(unknown)");
     }
-    headerTitle = "Closest target";
-    headerSubtitle = "";
-
     addRow("Flight", flight);
     String speedValue = "--";
     if (!isnan(closestAircraft.groundSpeed) && closestAircraft.groundSpeed >= 0) {
@@ -529,9 +518,11 @@ void renderInfoPanel() {
     }
     addRow("Speed", speedValue);
     addRow("Distance", String(closestAircraft.distanceKm, 1) + " km");
+    String altitudeValue = "--";
     if (closestAircraft.altitude >= 0) {
-      addRow("Altitude", String(closestAircraft.altitude) + " ft");
+      altitudeValue = String(closestAircraft.altitude) + " ft";
     }
+    addRow("Altitude", altitudeValue);
     addRow("Bearing", String(closestAircraft.bearing, 0) + " deg");
     if (!isnan(closestAircraft.track)) {
       addRow("Track", String(closestAircraft.track, 0) + " deg");
@@ -540,8 +531,11 @@ void renderInfoPanel() {
       addRow("ETA", String(closestAircraft.minutesToClosest, 1) + " min");
     }
   } else {
-    headerTitle = "No aircraft in range";
-    headerSubtitle = dataConnectionOk ? String("Waiting for traffic") : String("Awaiting data link");
+    String statusMessage = dataConnectionOk ? String("Waiting for traffic") : String("Awaiting data link");
+    addRow("Flight", statusMessage);
+    addRow("Speed", "--");
+    addRow("Distance", "--");
+    addRow("Altitude", "--");
   }
 
   if (aircraftCount > 0) {
@@ -552,8 +546,8 @@ void renderInfoPanel() {
     addRow("Traffic", traffic);
   }
 
-  int headerHeight = min(INFO_TABLE_HEADER_HEIGHT, textAreaHeight);
-  int availableHeight = max(textAreaHeight - headerHeight, 0);
+  int headerHeight = 0;
+  int availableHeight = textAreaHeight;
   int maxRows = INFO_TABLE_ROW_HEIGHT > 0 ? availableHeight / INFO_TABLE_ROW_HEIGHT : 0;
   if (maxRows < rowCount) {
     rowCount = maxRows;
@@ -572,7 +566,6 @@ void renderInfoPanel() {
 
   if (rowStructureChanged) {
     tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_INFO_TABLE_BG);
-    tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, headerHeight, COLOR_INFO_TABLE_HEADER_BG);
     tft.drawRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_INFO_TABLE_BORDER);
 
     if (rowCount > 0) {
@@ -587,37 +580,6 @@ void renderInfoPanel() {
   }
 
   int textHeight = INFO_TEXT_SIZE * 8;
-  bool headerTextChanged = rowStructureChanged || headerTitle != infoPanelCache.cachedHeaderTitle ||
-                           headerSubtitle != infoPanelCache.cachedHeaderSubtitle;
-  if (headerTextChanged) {
-    int headerFillX = infoAreaX + 1;
-    int headerFillY = infoAreaY + 1;
-    int headerFillW = max(infoAreaWidth - 2, 0);
-    int headerFillH = max(headerHeight - 2, 0);
-    if (headerFillW > 0 && headerFillH > 0) {
-      tft.fillRect(headerFillX, headerFillY, headerFillW, headerFillH, COLOR_INFO_TABLE_HEADER_BG);
-    }
-
-    int headerCenterX = infoAreaX + infoAreaWidth / 2;
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(COLOR_TEXT, COLOR_INFO_TABLE_HEADER_BG);
-    if (headerSubtitle.length()) {
-      int titleY = infoAreaY + headerHeight / 2 - textHeight / 2;
-      int subtitleY = titleY + textHeight;
-      if (titleY < infoAreaY + INFO_TABLE_PADDING) {
-        titleY = infoAreaY + INFO_TABLE_PADDING;
-        subtitleY = titleY + textHeight;
-      }
-      if (subtitleY > infoAreaY + headerHeight - INFO_TABLE_PADDING) {
-        subtitleY = infoAreaY + headerHeight - INFO_TABLE_PADDING;
-      }
-      tft.drawString(headerTitle, headerCenterX, titleY);
-      tft.drawString(headerSubtitle, headerCenterX, subtitleY);
-    } else {
-      tft.drawString(headerTitle, headerCenterX, infoAreaY + headerHeight / 2);
-    }
-  }
-
   int rowsToProcess = max(rowCount, infoPanelCache.cachedRowCount);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COLOR_TEXT, COLOR_INFO_TABLE_BG);
@@ -676,8 +638,6 @@ void renderInfoPanel() {
   infoPanelCache.cachedTableTop = tableTop;
   infoPanelCache.cachedDividerX = dividerX;
   infoPanelCache.cachedRowCount = rowCount;
-  infoPanelCache.cachedHeaderTitle = headerTitle;
-  infoPanelCache.cachedHeaderSubtitle = headerSubtitle;
   for (int i = 0; i < rowCount; ++i) {
     infoPanelCache.cachedRows[i] = rows[i];
   }
