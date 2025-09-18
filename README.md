@@ -106,9 +106,11 @@ retry 5 5 arduino-cli lib install "ArduinoJson"
 retry 5 5 arduino-cli lib install "TFT_eSPI"
 
 echo "✅ Setup complete. Compile with:"
-echo "   arduino-cli compile --fqbn esp32:esp32:esp32 freenove.ino"
+echo "   arduino-cli compile --fqbn esp32:esp32:esp32 sketches/freenove"
 ```
 
-The command completes successfully when the required libraries (`ArduinoJson`, `TFT_eSPI`, etc.) are installed.
+The command completes successfully when the required libraries (`ArduinoJson`, `TFT_eSPI`, etc.) are installed. A thin wrapper
+sketch lives in `sketches/freenove` so that `arduino-cli` sees a folder/file pair with matching names while still keeping the
+primary source at the repository root for IDE users.
 
 
