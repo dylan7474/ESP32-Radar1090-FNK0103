@@ -145,20 +145,23 @@ bool eepromInitialized = false;
 
 struct AirspaceZone {
   const char *name;
+  const char *iata;
   double lat;
   double lon;
   double radiusKm;
 };
 
+static const int AIRSPACE_LABEL_TEXT_SIZE = 1;
+
 static const AirspaceZone AIRSPACE_ZONES[] = {
     // Approximate airport control zones drawn with a 10 NM (~18.5 km) radius
-    {"Teesside (MME)", 54.509189, -1.429406, 18.5},
-    {"Newcastle (NCL)", 55.037500, -1.691667, 18.5},
-    {"Leeds Bradford (LBA)", 53.865900, -1.660600, 18.5},
-    {"Humberside (HUY)", 53.574500, -0.350800, 18.5},
+    {"Teesside", "MME", 54.509189, -1.429406, 18.5},
+    {"Newcastle", "NCL", 55.037500, -1.691667, 18.5},
+    {"Leeds Bradford", "LBA", 53.865900, -1.660600, 18.5},
+    {"Humberside", "HUY", 53.574500, -0.350800, 18.5},
     // Manchester is a major hub, so give it a slightly larger 15 NM (~27.8 km) radius
-    {"Manchester (MAN)", 53.365000, -2.272400, 27.8},
-    {"Blackpool (BLK)", 53.771700, -3.028600, 18.5},
+    {"Manchester", "MAN", 53.365000, -2.272400, 27.8},
+    {"Blackpool", "BLK", 53.771700, -3.028600, 18.5},
 };
 static const int AIRSPACE_ZONE_COUNT = sizeof(AIRSPACE_ZONES) / sizeof(AIRSPACE_ZONES[0]);
 
@@ -488,6 +491,9 @@ void drawAirspaceZones(GFX &gfx, int centerX, int centerY, int radius, double ro
   }
 
   double usableRadius = (double)max(radius - 3, 1);
+  gfx.setTextDatum(MC_DATUM);
+  gfx.setTextSize(AIRSPACE_LABEL_TEXT_SIZE);
+  gfx.setTextColor(COLOR_AIRSPACE, COLOR_BACKGROUND);
   for (int i = 0; i < AIRSPACE_ZONE_COUNT; ++i) {
     const AirspaceZone &zone = AIRSPACE_ZONES[i];
     if (zone.radiusKm <= 0.0) {
@@ -514,7 +520,12 @@ void drawAirspaceZones(GFX &gfx, int centerX, int centerY, int radius, double ro
 
     gfx.drawCircle(zoneCenterX, zoneCenterY, zonePixelRadius, COLOR_AIRSPACE);
     gfx.drawPixel(zoneCenterX, zoneCenterY, COLOR_AIRSPACE);
+    if (zone.iata != nullptr && zone.iata[0] != '\0') {
+      gfx.drawString(zone.iata, zoneCenterX, zoneCenterY);
+    }
   }
+  gfx.setTextDatum(TL_DATUM);
+  gfx.setTextSize(1);
 }
 
 void setup() {
