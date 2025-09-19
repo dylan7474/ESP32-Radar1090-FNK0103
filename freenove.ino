@@ -1002,18 +1002,6 @@ void drawRadar() {
         continue;
       }
 
-      double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
-      if (normalized > 1.0) {
-        normalized = 1.0;
-      } else if (normalized < 0.0 || isnan(normalized)) {
-        continue;
-      }
-
-      double angleRad = deg2rad(radarContacts[i].displayBearing + rotationOffsetDeg);
-      double radius = normalized * (radarRadius - 3);
-      int contactX = spriteCenter + (int)round(sin(angleRad) * radius);
-      int contactY = spriteCenter - (int)round(cos(angleRad) * radius);
-
       double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
       if (!radarContacts[i].stale && angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
         radarContacts[i].displayDistanceKm = radarContacts[i].distanceKm;
@@ -1034,6 +1022,18 @@ void drawRadar() {
         radarContacts[i].valid = false;
         continue;
       }
+
+      double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
+      if (normalized > 1.0) {
+        normalized = 1.0;
+      } else if (normalized < 0.0 || isnan(normalized)) {
+        continue;
+      }
+
+      double angleRad = deg2rad(radarContacts[i].displayBearing + rotationOffsetDeg);
+      double radius = normalized * (radarRadius - 3);
+      int contactX = spriteCenter + (int)round(sin(angleRad) * radius);
+      int contactY = spriteCenter - (int)round(cos(angleRad) * radius);
 
       float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
       uint16_t baseColor;
@@ -1081,18 +1081,6 @@ void drawRadar() {
         continue;
       }
 
-      double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
-      if (normalized > 1.0) {
-        normalized = 1.0;
-      } else if (normalized < 0.0 || isnan(normalized)) {
-        continue;
-      }
-
-      double angleRad = deg2rad(radarContacts[i].displayBearing + rotationOffsetDeg);
-      double radius = normalized * (radarRadius - 3);
-      int contactX = centerX + (int)round(sin(angleRad) * radius);
-      int contactY = centerY - (int)round(cos(angleRad) * radius);
-
       double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
       if (!radarContacts[i].stale && angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
         radarContacts[i].displayDistanceKm = radarContacts[i].distanceKm;
@@ -1113,6 +1101,18 @@ void drawRadar() {
         radarContacts[i].valid = false;
         continue;
       }
+
+      double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
+      if (normalized > 1.0) {
+        normalized = 1.0;
+      } else if (normalized < 0.0 || isnan(normalized)) {
+        continue;
+      }
+
+      double angleRad = deg2rad(radarContacts[i].displayBearing + rotationOffsetDeg);
+      double radius = normalized * (radarRadius - 3);
+      int contactX = centerX + (int)round(sin(angleRad) * radius);
+      int contactY = centerY - (int)round(cos(angleRad) * radius);
 
       float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
       uint16_t baseColor;
