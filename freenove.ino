@@ -154,6 +154,11 @@ static const AirspaceZone AIRSPACE_ZONES[] = {
     // Approximate airport control zones drawn with a 10 NM (~18.5 km) radius
     {"Teesside (MME)", 54.509189, -1.429406, 18.5},
     {"Newcastle (NCL)", 55.037500, -1.691667, 18.5},
+    {"Leeds Bradford (LBA)", 53.865900, -1.660600, 18.5},
+    {"Humberside (HUY)", 53.574500, -0.350800, 18.5},
+    // Manchester is a major hub, so give it a slightly larger 15 NM (~27.8 km) radius
+    {"Manchester (MAN)", 53.365000, -2.272400, 27.8},
+    {"Blackpool (BLK)", 53.771700, -3.028600, 18.5},
 };
 static const int AIRSPACE_ZONE_COUNT = sizeof(AIRSPACE_ZONES) / sizeof(AIRSPACE_ZONES[0]);
 
