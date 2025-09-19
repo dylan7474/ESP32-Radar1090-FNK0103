@@ -19,6 +19,7 @@ static const uint16_t COLOR_RADAR_GRID = TFT_DARKGREY;
 static const uint16_t COLOR_RADAR_CONTACT = TFT_GREEN;
 static const uint16_t COLOR_RADAR_INBOUND = TFT_RED;
 static const uint16_t COLOR_RADAR_HOME = TFT_SKYBLUE;
+static const uint16_t COLOR_AIRSPACE = TFT_PURPLE;
 static const uint16_t COLOR_INFO_TABLE_BG = TFT_NAVY;
 static const uint16_t COLOR_INFO_TABLE_HEADER_BG = TFT_BLUE;
 static const uint16_t COLOR_INFO_TABLE_BORDER = TFT_WHITE;
@@ -141,6 +142,20 @@ uint8_t displayRotation = 0;
 uint8_t radarRotationSteps = 0;
 
 bool eepromInitialized = false;
+
+struct AirspaceZone {
+  const char *name;
+  double lat;
+  double lon;
+  double radiusKm;
+};
+
+static const AirspaceZone AIRSPACE_ZONES[] = {
+    // Approximate airport control zones drawn with a 10 NM (~18.5 km) radius
+    {"Teesside (MME)", 54.509189, -1.429406, 18.5},
+    {"Newcastle (NCL)", 55.037500, -1.691667, 18.5},
+};
+static const int AIRSPACE_ZONE_COUNT = sizeof(AIRSPACE_ZONES) / sizeof(AIRSPACE_ZONES[0]);
 
 enum ButtonType {
   BUTTON_RADAR_RANGE,
@@ -457,6 +472,43 @@ void drawRadarCross(GFX &gfx, int centerX, int centerY, int radius, uint16_t col
     int y2 = centerY - (int)round(cos(oppositeRad) * radius);
 
     gfx.drawLine(x1, y1, x2, y2, color);
+  }
+}
+
+template <typename GFX>
+void drawAirspaceZones(GFX &gfx, int centerX, int centerY, int radius, double rotationOffsetDeg,
+                       double radarRangeKm) {
+  if (radius <= 0 || radarRangeKm <= 0.0) {
+    return;
+  }
+
+  double usableRadius = (double)max(radius - 3, 1);
+  for (int i = 0; i < AIRSPACE_ZONE_COUNT; ++i) {
+    const AirspaceZone &zone = AIRSPACE_ZONES[i];
+    if (zone.radiusKm <= 0.0) {
+      continue;
+    }
+
+    double distanceKm = haversine(USER_LAT, USER_LON, zone.lat, zone.lon);
+    if ((distanceKm - zone.radiusKm) > radarRangeKm) {
+      continue;
+    }
+
+    double bearingDeg = calculateBearing(USER_LAT, USER_LON, zone.lat, zone.lon);
+    double displayDistanceKm = min(distanceKm, radarRangeKm);
+    double normalized = displayDistanceKm / radarRangeKm;
+    double angleRad = deg2rad(bearingDeg + rotationOffsetDeg);
+    double radialDistance = normalized * usableRadius;
+    int zoneCenterX = centerX + (int)round(sin(angleRad) * radialDistance);
+    int zoneCenterY = centerY - (int)round(cos(angleRad) * radialDistance);
+
+    double effectiveRadiusKm = min(zone.radiusKm, radarRangeKm);
+    int zonePixelRadius = (int)round((effectiveRadiusKm / radarRangeKm) * usableRadius);
+    zonePixelRadius = max(zonePixelRadius, 2);
+    zonePixelRadius = min(zonePixelRadius, radius);
+
+    gfx.drawCircle(zoneCenterX, zoneCenterY, zonePixelRadius, COLOR_AIRSPACE);
+    gfx.drawPixel(zoneCenterX, zoneCenterY, COLOR_AIRSPACE);
   }
 }
 
@@ -916,6 +968,7 @@ void drawRadar() {
     radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_OUTLINE);
     radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius / 2, COLOR_RADAR_OUTLINE);
     drawRadarCross(radarSprite, spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_GRID, rotationOffsetDeg);
+    drawAirspaceZones(radarSprite, spriteCenter, spriteCenter, radarRadius, rotationOffsetDeg, radarRangeKm);
     radarSprite.fillCircle(spriteCenter, spriteCenter, 3, COLOR_RADAR_HOME);
 
     int sweepX = spriteCenter + (int)round(sin(sweepRad) * (radarRadius - 1));
@@ -991,6 +1044,7 @@ void drawRadar() {
     tft.drawCircle(centerX, centerY, radarRadius, COLOR_RADAR_OUTLINE);
     tft.drawCircle(centerX, centerY, radarRadius / 2, COLOR_RADAR_OUTLINE);
     drawRadarCross(tft, centerX, centerY, radarRadius, COLOR_RADAR_GRID, rotationOffsetDeg);
+    drawAirspaceZones(tft, centerX, centerY, radarRadius, rotationOffsetDeg, radarRangeKm);
     tft.fillCircle(centerX, centerY, 3, COLOR_RADAR_HOME);
 
     int sweepX = centerX + (int)round(sin(sweepRad) * (radarRadius - 1));
