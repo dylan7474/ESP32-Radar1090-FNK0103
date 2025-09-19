@@ -580,11 +580,14 @@ void loop() {
 struct RadarContact {
   double distanceKm;
   double bearing;
+  double displayDistanceKm;
+  double displayBearing;
   bool inbound;
   String flight;
   int altitude;
   double groundSpeed;
   double track;
+  double displayTrack;
   double minutesToClosest;
   bool valid;
   unsigned long lastHighlightTime;
@@ -604,10 +607,13 @@ void resetRadarContacts() {
     radarContacts[i].inbound = false;
     radarContacts[i].distanceKm = 0.0;
     radarContacts[i].bearing = 0.0;
+    radarContacts[i].displayDistanceKm = 0.0;
+    radarContacts[i].displayBearing = 0.0;
     radarContacts[i].stale = false;
     radarContacts[i].altitude = -1;
     radarContacts[i].groundSpeed = NAN;
     radarContacts[i].track = NAN;
+    radarContacts[i].displayTrack = NAN;
     radarContacts[i].minutesToClosest = NAN;
     radarContacts[i].squawk = "";
   }
@@ -729,7 +735,7 @@ void renderInfoPanel() {
       speedValue = String(activeContact->groundSpeed, 0) + " kt";
     }
     addRow("Speed", speedValue);
-    addRow("Distance", String(activeContact->distanceKm, 1) + " km");
+    addRow("Distance", String(activeContact->displayDistanceKm, 1) + " km");
     String altitudeValue = "--";
     if (activeContact->altitude >= 0) {
       altitudeValue = String(activeContact->altitude) + " ft";
@@ -996,20 +1002,23 @@ void drawRadar() {
         continue;
       }
 
-      double normalized = radarContacts[i].distanceKm / radarRangeKm;
+      double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
       if (normalized > 1.0) {
         normalized = 1.0;
       } else if (normalized < 0.0 || isnan(normalized)) {
         continue;
       }
 
-      double angleRad = deg2rad(radarContacts[i].bearing + rotationOffsetDeg);
+      double angleRad = deg2rad(radarContacts[i].displayBearing + rotationOffsetDeg);
       double radius = normalized * (radarRadius - 3);
       int contactX = spriteCenter + (int)round(sin(angleRad) * radius);
       int contactY = spriteCenter - (int)round(cos(angleRad) * radius);
 
       double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
       if (!radarContacts[i].stale && angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
+        radarContacts[i].displayDistanceKm = radarContacts[i].distanceKm;
+        radarContacts[i].displayBearing = radarContacts[i].bearing;
+        radarContacts[i].displayTrack = radarContacts[i].track;
         radarContacts[i].lastHighlightTime = now;
         if (setActiveContact(i)) {
           highlightChanged = true;
@@ -1036,9 +1045,9 @@ void drawRadar() {
         baseColor = COLOR_RADAR_CONTACT;
       }
       uint16_t fadedColor = fadeColor(baseColor, alpha);
-      double headingDeg = radarContacts[i].track;
+      double headingDeg = radarContacts[i].displayTrack;
       if (isnan(headingDeg)) {
-        headingDeg = radarContacts[i].bearing;
+        headingDeg = radarContacts[i].displayBearing;
       }
       drawAircraftIcon(radarSprite, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
     }
@@ -1072,20 +1081,23 @@ void drawRadar() {
         continue;
       }
 
-      double normalized = radarContacts[i].distanceKm / radarRangeKm;
+      double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
       if (normalized > 1.0) {
         normalized = 1.0;
       } else if (normalized < 0.0 || isnan(normalized)) {
         continue;
       }
 
-      double angleRad = deg2rad(radarContacts[i].bearing + rotationOffsetDeg);
+      double angleRad = deg2rad(radarContacts[i].displayBearing + rotationOffsetDeg);
       double radius = normalized * (radarRadius - 3);
       int contactX = centerX + (int)round(sin(angleRad) * radius);
       int contactY = centerY - (int)round(cos(angleRad) * radius);
 
       double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
       if (!radarContacts[i].stale && angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
+        radarContacts[i].displayDistanceKm = radarContacts[i].distanceKm;
+        radarContacts[i].displayBearing = radarContacts[i].bearing;
+        radarContacts[i].displayTrack = radarContacts[i].track;
         radarContacts[i].lastHighlightTime = now;
         if (setActiveContact(i)) {
           highlightChanged = true;
@@ -1112,9 +1124,9 @@ void drawRadar() {
         baseColor = COLOR_RADAR_CONTACT;
       }
       uint16_t fadedColor = fadeColor(baseColor, alpha);
-      double headingDeg = radarContacts[i].track;
+      double headingDeg = radarContacts[i].displayTrack;
       if (isnan(headingDeg)) {
-        headingDeg = radarContacts[i].bearing;
+        headingDeg = radarContacts[i].displayBearing;
       }
       drawAircraftIcon(tft, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
     }
@@ -1360,6 +1372,8 @@ void fetchAircraft() {
           RadarContact &contact = radarContacts[radarContactCount++];
           contact.distanceKm = distance;
           contact.bearing = bearingToHome;
+          contact.displayDistanceKm = distance;
+          contact.displayBearing = bearingToHome;
           contact.inbound = inbound;
           contact.valid = true;
           contact.stale = false;
@@ -1367,12 +1381,16 @@ void fetchAircraft() {
           contact.altitude = altitude;
           contact.groundSpeed = groundSpeed;
           contact.track = track;
+          contact.displayTrack = track;
           contact.minutesToClosest = minutesToClosest;
           if (matchIndex >= 0) {
             unsigned long previousHighlight = previousContacts[matchIndex].lastHighlightTime;
             if (previousHighlight != 0 && (fetchTime - previousHighlight) < RADAR_FADE_DURATION_MS) {
               contact.lastHighlightTime = previousHighlight;
             }
+            contact.displayDistanceKm = previousContacts[matchIndex].displayDistanceKm;
+            contact.displayBearing = previousContacts[matchIndex].displayBearing;
+            contact.displayTrack = previousContacts[matchIndex].displayTrack;
             previousMatched[matchIndex] = true;
             if (matchIndex == previousActiveIndex && contact.lastHighlightTime != 0) {
               setActiveContact(radarContactCount - 1);
