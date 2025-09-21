@@ -440,21 +440,21 @@ struct audio_has_setEofCallback<
 
 template <typename AudioType>
 auto trySetAudioInputBufferSizeImpl(AudioType &player, size_t size, int)
-    -> decltype(player.setInBufferSize(size), bool()) {
+    -> decltype((std::declval<AudioType &>().setInBufferSize(size_t{}), bool())) {
   player.setInBufferSize(size);
   return true;
 }
 
 template <typename AudioType>
 auto trySetAudioInputBufferSizeImpl(AudioType &player, size_t size, long)
-    -> decltype(player.setBufferSize(size), bool()) {
+    -> decltype((std::declval<AudioType &>().setBufferSize(size_t{}), bool())) {
   player.setBufferSize(size);
   return true;
 }
 
 template <typename AudioType>
 auto trySetAudioInputBufferSizeImpl(AudioType &player, size_t size, char)
-    -> decltype(player.inBufferSize = size, bool()) {
+    -> decltype((std::declval<AudioType &>().inBufferSize = size_t{}, bool())) {
   player.inBufferSize = size;
   return true;
 }
