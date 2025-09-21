@@ -101,21 +101,17 @@ static const int EEPROM_SIZE = 4;
 static const int COMPASS_LABEL_COUNT = 4;
 
 static const unsigned long AUDIO_RETRY_INTERVAL_MS = 5000;
-static const unsigned long AUDIO_TASK_IDLE_DELAY_MS = 5;
 static const unsigned long AUDIO_RECONNECT_BACKOFF_MS = 1000;
-static const size_t AUDIO_TASK_STACK_BYTES = 12288;
-static const uint32_t AUDIO_TASK_STACK_SIZE =
-    (AUDIO_TASK_STACK_BYTES + sizeof(StackType_t) - 1) / sizeof(StackType_t);
-static_assert(AUDIO_TASK_STACK_SIZE > 0, "Audio task stack size must be positive");
-static const UBaseType_t AUDIO_TASK_PRIORITY = 2;
 static const BaseType_t AUDIO_TASK_CORE = 0;
 
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite radarSprite = TFT_eSprite(&tft);
 
 Audio audio;
-TaskHandle_t audioTaskHandle = nullptr;
 volatile bool audioRestartRequested = true;
+unsigned long audioNextReconnectTime = 0;
+unsigned long audioLastConnectAttempt = 0;
+wl_status_t audioLastWifiStatus = WL_NO_SHIELD;
 
 #if !defined(BOARD_HAS_PSRAM)
 extern "C" void *__malloc_heap_psram(size_t size) {
@@ -396,7 +392,7 @@ void handleTouch();
 void rotateRadarOrientation();
 
 void initializeAudioPlayback();
-void audioStreamTask(void *param);
+void serviceAudioStream();
 void requestAudioRestart();
 void audio_info(const char *info);
 void audio_showstreamtitle(const char *info);
@@ -476,6 +472,19 @@ void trySetAudioInputBufferSize(AudioType &player, size_t size) {
 }
 
 template <typename AudioType>
+auto trySetAudioTaskCoreImpl(AudioType &player, uint8_t core, int)
+    -> decltype(std::declval<AudioType &>().setAudioTaskCore(uint8_t{}), void()) {
+  player.setAudioTaskCore(core);
+}
+
+inline void trySetAudioTaskCoreImpl(...) {}
+
+template <typename AudioType>
+void trySetAudioTaskCore(AudioType &player, uint8_t core) {
+  trySetAudioTaskCoreImpl(player, core, 0);
+}
+
+template <typename AudioType>
 void configureAudioCallbacksImpl(AudioType &player, std::true_type) {
   (void)player;
   AudioType::audio_info_callback = [](typename AudioType::msg_t msg) {
@@ -539,6 +548,8 @@ void configureAudioCallbacks(AudioType &player) {
 
 void requestAudioRestart() {
   audioRestartRequested = true;
+  audioNextReconnectTime = 0;
+  audioLastConnectAttempt = 0;
 }
 
 void initializeAudioPlayback() {
@@ -548,72 +559,69 @@ void initializeAudioPlayback() {
   audio.forceMono(true);
   audio.setVolume(volume);
   configureAudioCallbacks(audio);
-
-  if (audioTaskHandle == nullptr) {
-    BaseType_t result = xTaskCreatePinnedToCore(audioStreamTask, "AudioStream", AUDIO_TASK_STACK_SIZE,
-                                                nullptr, AUDIO_TASK_PRIORITY, &audioTaskHandle, AUDIO_TASK_CORE);
-    if (result != pdPASS) {
-      Serial.println("Failed to create audio streaming task.");
-    }
-  }
+  trySetAudioTaskCore(audio, (uint8_t)AUDIO_TASK_CORE);
 }
 
-void audioStreamTask(void *param) {
-  (void)param;
-  unsigned long lastAttempt = 0;
-  wl_status_t lastStatus = WL_NO_SHIELD;
+void serviceAudioStream() {
+  wl_status_t status = WiFi.status();
+  unsigned long now = millis();
 
-  for (;;) {
-    wl_status_t status = WiFi.status();
-    if (status != lastStatus) {
-      if (status == WL_CONNECTED) {
-        Serial.println("Audio: WiFi connected, preparing to (re)start stream.");
-        requestAudioRestart();
-      } else {
-        if (audio.isRunning()) {
-          audio.stopSong();
-        }
-        Serial.println("Audio: WiFi disconnected.");
-        lastAttempt = 0;
-      }
-      lastStatus = status;
-    }
-
+  if (status != audioLastWifiStatus) {
     if (status == WL_CONNECTED) {
-      if (audioRestartRequested) {
-        audio.stopSong();
-        lastAttempt = 0;
-        audioRestartRequested = false;
-        vTaskDelay(pdMS_TO_TICKS(AUDIO_RECONNECT_BACKOFF_MS));
-      }
-
-      if (audio.isRunning()) {
-        audio.loop();
-        if (audio.isRunning()) {
-          vTaskDelay(pdMS_TO_TICKS(1));
-        } else {
-          vTaskDelay(pdMS_TO_TICKS(AUDIO_TASK_IDLE_DELAY_MS));
-        }
-        continue;
-      }
-
-      unsigned long now = millis();
-      if (lastAttempt == 0 || (now - lastAttempt) >= AUDIO_RETRY_INTERVAL_MS) {
-        Serial.println("Audio: attempting to connect to stream.");
-        bool ok = audio.connecttohost(AUDIO_STREAM_URL);
-        if (!ok) {
-          Serial.println("Audio: stream connection failed.");
-        }
-        lastAttempt = now;
-      } else {
-        vTaskDelay(pdMS_TO_TICKS(100));
-      }
+      Serial.println("Audio: WiFi connected, preparing to (re)start stream.");
+      requestAudioRestart();
     } else {
-      vTaskDelay(pdMS_TO_TICKS(500));
+      if (audio.isRunning()) {
+        audio.stopSong();
+      }
+      Serial.println("Audio: WiFi disconnected.");
+      audioLastConnectAttempt = 0;
+      audioNextReconnectTime = 0;
     }
-
-    vTaskDelay(pdMS_TO_TICKS(AUDIO_TASK_IDLE_DELAY_MS));
+    audioLastWifiStatus = status;
   }
+
+  if (status != WL_CONNECTED) {
+    return;
+  }
+
+  if (audioRestartRequested) {
+    if (audio.isRunning()) {
+      audio.stopSong();
+    }
+    audioRestartRequested = false;
+    audioLastConnectAttempt = 0;
+    audioNextReconnectTime = now + AUDIO_RECONNECT_BACKOFF_MS;
+  }
+
+  if (audio.isRunning()) {
+    audio.loop();
+    return;
+  }
+
+  if (audioNextReconnectTime != 0) {
+    long remaining = (long)(audioNextReconnectTime - now);
+    if (remaining > 0) {
+      audio.loop();
+      return;
+    }
+    audioNextReconnectTime = 0;
+  }
+
+  if (audioLastConnectAttempt != 0 && (now - audioLastConnectAttempt) < AUDIO_RETRY_INTERVAL_MS) {
+    audio.loop();
+    return;
+  }
+
+  Serial.println("Audio: attempting to connect to stream.");
+  if (!audio.connecttohost(AUDIO_STREAM_URL)) {
+    Serial.println("Audio: stream connection failed.");
+    audioNextReconnectTime = now + AUDIO_RECONNECT_BACKOFF_MS;
+  } else {
+    audioNextReconnectTime = 0;
+  }
+  audioLastConnectAttempt = now;
+  audio.loop();
 }
 
 void audio_info(const char *info) {
@@ -834,6 +842,8 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+
+  serviceAudioStream();
 
   if (WiFi.status() != WL_CONNECTED) {
     if (now - lastWifiAttempt > WIFI_RETRY_INTERVAL_MS) {
