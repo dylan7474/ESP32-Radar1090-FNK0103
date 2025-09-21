@@ -7,6 +7,11 @@
 #include <math.h>
 #include <cstring>
 #include <EEPROM.h>
+#include <AudioFileSourceBuffer.h>
+#include <AudioFileSourceICYStream.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioLogger.h>
+#include <AudioOutputI2S.h>
 
 #include "config.h"
 #include "plane_icon.h"
@@ -27,6 +32,7 @@ static const int INFO_TEXT_SIZE = 2;
 static const unsigned long REFRESH_INTERVAL_MS = 5000;
 static const unsigned long WIFI_RETRY_INTERVAL_MS = 15000;
 static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
+static const unsigned long AUDIO_RETRY_INTERVAL_MS = 5000;
 static const int RADAR_MARGIN = 12;
 static const int RADAR_TOP_PADDING = 24;
 static const int MAX_RADAR_CONTACTS = 40;
@@ -126,6 +132,14 @@ int alertRangeIndex = 0;
 
 int lastWifiBars = -1;
 bool lastWifiConnectedState = false;
+
+AudioGeneratorMP3 *audioGenerator = nullptr;
+AudioFileSourceICYStream *audioStreamSource = nullptr;
+AudioFileSourceBuffer *audioStreamBuffer = nullptr;
+AudioOutputI2S *audioOutput = nullptr;
+bool audioOutputInitialized = false;
+bool audioStreamRunning = false;
+unsigned long lastAudioAttempt = 0;
 
 int radarCenterX = 0;
 int radarCenterY = 0;
@@ -528,8 +542,139 @@ void drawAirspaceZones(GFX &gfx, int centerX, int centerY, int radius, double ro
   gfx.setTextSize(1);
 }
 
+void scheduleAudioAttempt(bool immediate) {
+  unsigned long now = millis();
+  if (immediate) {
+    if (now >= AUDIO_RETRY_INTERVAL_MS) {
+      lastAudioAttempt = now - AUDIO_RETRY_INTERVAL_MS;
+    } else {
+      lastAudioAttempt = 0;
+    }
+  } else {
+    lastAudioAttempt = now;
+  }
+}
+
+void initializeAudioOutput() {
+  if (audioOutputInitialized) {
+    return;
+  }
+
+  audioOutput = new AudioOutputI2S();
+  if (audioOutput == nullptr) {
+    Serial.println("Failed to allocate audio output.");
+    return;
+  }
+
+  audioOutput->SetPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
+  audioOutput->SetChannels(2);
+  audioOutput->SetGain(0.6f);
+  audioOutputInitialized = true;
+}
+
+void stopAudioStream() {
+  if (audioGenerator != nullptr) {
+    audioGenerator->stop();
+    delete audioGenerator;
+    audioGenerator = nullptr;
+  }
+
+  if (audioStreamBuffer != nullptr) {
+    delete audioStreamBuffer;
+    audioStreamBuffer = nullptr;
+  }
+
+  if (audioStreamSource != nullptr) {
+    audioStreamSource->close();
+    delete audioStreamSource;
+    audioStreamSource = nullptr;
+  }
+
+  audioStreamRunning = false;
+}
+
+bool startAudioStream() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  initializeAudioOutput();
+  if (!audioOutputInitialized) {
+    return false;
+  }
+
+  stopAudioStream();
+
+  Serial.println("Attempting to start audio stream...");
+  audioStreamSource = new AudioFileSourceICYStream(AUDIO_STREAM_URL);
+  if (audioStreamSource == nullptr) {
+    Serial.println("Failed to allocate audio stream source.");
+    return false;
+  }
+
+  audioStreamBuffer = new AudioFileSourceBuffer(audioStreamSource, 8192);
+  if (audioStreamBuffer == nullptr) {
+    Serial.println("Failed to allocate audio stream buffer.");
+    stopAudioStream();
+    return false;
+  }
+  audioStreamBuffer->SetTimeoutMs(5000);
+
+  audioGenerator = new AudioGeneratorMP3();
+  if (audioGenerator == nullptr) {
+    Serial.println("Failed to allocate audio generator.");
+    stopAudioStream();
+    return false;
+  }
+
+  if (!audioGenerator->begin(audioStreamBuffer, audioOutput)) {
+    Serial.println("Unable to start MP3 stream.");
+    stopAudioStream();
+    return false;
+  }
+
+  audioStreamRunning = true;
+  Serial.println("Audio stream started.");
+  return true;
+}
+
+void updateAudioStream() {
+  if (audioGenerator != nullptr && audioGenerator->isRunning()) {
+    if (!audioGenerator->loop()) {
+      Serial.println("Audio stream interrupted. Scheduling restart.");
+      stopAudioStream();
+      scheduleAudioAttempt(false);
+    }
+    return;
+  }
+
+  if (audioStreamRunning && (audioGenerator == nullptr || !audioGenerator->isRunning())) {
+    Serial.println("Audio stream stopped unexpectedly. Scheduling restart.");
+    stopAudioStream();
+    scheduleAudioAttempt(false);
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (audioStreamRunning || audioGenerator != nullptr) {
+      Serial.println("WiFi disconnected. Stopping audio stream.");
+      stopAudioStream();
+      scheduleAudioAttempt(false);
+    }
+    return;
+  }
+
+  if (!audioStreamRunning && (millis() - lastAudioAttempt >= AUDIO_RETRY_INTERVAL_MS)) {
+    if (!startAudioStream()) {
+      scheduleAudioAttempt(false);
+    } else {
+      scheduleAudioAttempt(false);
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
+  AudioLogger::instance().begin(Serial, AudioLogger::Warning);
   tft.begin();
   displayRotation = 0;
   tft.setRotation(displayRotation);
@@ -548,6 +693,7 @@ void setup() {
 
   connectWiFi();
   if (WiFi.status() == WL_CONNECTED) {
+    scheduleAudioAttempt(true);
     fetchAircraft();
     lastFetchTime = millis();
   }
@@ -573,6 +719,8 @@ void loop() {
   }
 
   handleTouch();
+
+  updateAudioStream();
 
   delay(10);
 }
@@ -1159,8 +1307,11 @@ void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("WiFi connected.");
     WiFi.setSleep(false);
+    scheduleAudioAttempt(true);
   } else {
     Serial.println("WiFi connection failed.");
+    stopAudioStream();
+    scheduleAudioAttempt(false);
   }
 
   updateDisplay();
