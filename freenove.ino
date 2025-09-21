@@ -103,7 +103,7 @@ static const int COMPASS_LABEL_COUNT = 4;
 static const unsigned long AUDIO_RETRY_INTERVAL_MS = 5000;
 static const unsigned long AUDIO_TASK_IDLE_DELAY_MS = 5;
 static const unsigned long AUDIO_RECONNECT_BACKOFF_MS = 1000;
-static const int AUDIO_TASK_STACK_SIZE = 6144;
+static const int AUDIO_TASK_STACK_SIZE = 12288;
 static const UBaseType_t AUDIO_TASK_PRIORITY = 2;
 static const BaseType_t AUDIO_TASK_CORE = 0;
 
