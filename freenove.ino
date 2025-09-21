@@ -7,6 +7,9 @@
 #include <math.h>
 #include <cstring>
 #include <EEPROM.h>
+#ifndef AUDIO_USE_MP3
+#define AUDIO_USE_MP3
+#endif
 #include <Audio.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -388,6 +391,9 @@ void initializeAudioPlayback() {
   audio.setPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
   int volume = constrain((int)AUDIO_STREAM_VOLUME, 0, 21);
   audio.setVolume(volume);
+  audio.setAudioInfoCallback(audio_info);
+  audio.setShowStreamTitleCallback(audio_showstreamtitle);
+  audio.setEofCallback(audio_eof_mp3);
 
   if (audioTaskHandle == nullptr) {
     BaseType_t result = xTaskCreatePinnedToCore(audioStreamTask, "AudioStream", AUDIO_TASK_STACK_SIZE,

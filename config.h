@@ -13,9 +13,9 @@
 #define DUMP1090_SERVER "192.168.50.100" // IP or hostname of dump1090 server
 #define DUMP1090_PORT 8080               // The default web port for dump1090 is often 8080
 
-// I2S pins for MAX98357A audio output
-#define I2S_BCLK_PIN  17
-#define I2S_LRCLK_PIN 16
+// I2S pins for MAX98357A audio output (defaults map to the FNK0103 speaker header)
+#define I2S_BCLK_PIN  26
+#define I2S_LRCLK_PIN 25
 #define I2S_DOUT_PIN  27
 
 // Audio stream configuration
