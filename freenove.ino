@@ -10,7 +10,6 @@
 #include <AudioFileSourceBuffer.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
-#include <AudioLogger.h>
 #include <AudioOutputI2S.h>
 
 #include "config.h"
@@ -618,7 +617,6 @@ bool startAudioStream() {
     stopAudioStream();
     return false;
   }
-  audioStreamBuffer->SetTimeoutMs(5000);
 
   audioGenerator = new AudioGeneratorMP3();
   if (audioGenerator == nullptr) {
@@ -674,7 +672,6 @@ void updateAudioStream() {
 
 void setup() {
   Serial.begin(115200);
-  AudioLogger::instance().begin(Serial, AudioLogger::Warning);
   tft.begin();
   displayRotation = 0;
   tft.setRotation(displayRotation);
@@ -1768,7 +1765,7 @@ void drawButton(int index) {
 bool readTouchPoint(int &screenX, int &screenY) {
   uint16_t rawX = 0;
   uint16_t rawY = 0;
-  if (!tft.getTouchRaw(&rawX, &rawY)) {
+  if (!tft.getTouch(&rawX, &rawY)) {
     return false;
   }
 
@@ -1776,6 +1773,22 @@ bool readTouchPoint(int &screenX, int &screenY) {
   long calMaxX = TOUCH_RAW_MAX_X;
   long calMinY = TOUCH_RAW_MIN_Y;
   long calMaxY = TOUCH_RAW_MAX_Y;
+
+#if defined(TOUCH_RAW_MIN_X) && defined(TOUCH_RAW_MAX_X) && defined(TOUCH_RAW_MIN_Y) && defined(TOUCH_RAW_MAX_Y)
+  uint16_t minXBound = (calMinX > 20) ? (uint16_t)(calMinX - 20) : 0;
+  uint16_t maxXBound = (calMaxX >= 0) ? (uint16_t)(calMaxX + 20) : 0;
+  uint16_t minYBound = (calMinY > 20) ? (uint16_t)(calMinY - 20) : 0;
+  uint16_t maxYBound = (calMaxY >= 0) ? (uint16_t)(calMaxY + 20) : 0;
+  bool withinRawRange = (rawX >= minXBound && rawX <= maxXBound && rawY >= minYBound && rawY <= maxYBound);
+#else
+  bool withinRawRange = true;
+#endif
+
+  if (!withinRawRange) {
+    screenX = rawX;
+    screenY = rawY;
+    return true;
+  }
 
 #if TOUCH_SWAP_XY
   uint16_t rawSwap = rawX;
