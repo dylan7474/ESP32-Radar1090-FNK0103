@@ -7,6 +7,7 @@
 #include <math.h>
 #include <cstring>
 #include <EEPROM.h>
+#include <esp_heap_caps.h>
 #include <type_traits>
 #include <utility>
 #ifndef AUDIO_USE_MP3
@@ -102,7 +103,7 @@ static const int COMPASS_LABEL_COUNT = 4;
 static const unsigned long AUDIO_RETRY_INTERVAL_MS = 5000;
 static const unsigned long AUDIO_TASK_IDLE_DELAY_MS = 5;
 static const unsigned long AUDIO_RECONNECT_BACKOFF_MS = 1000;
-static const int AUDIO_TASK_STACK_SIZE = 8192;
+static const int AUDIO_TASK_STACK_SIZE = 6144;
 static const UBaseType_t AUDIO_TASK_PRIORITY = 2;
 static const BaseType_t AUDIO_TASK_CORE = 0;
 
@@ -112,6 +113,19 @@ TFT_eSprite radarSprite = TFT_eSprite(&tft);
 Audio audio;
 TaskHandle_t audioTaskHandle = nullptr;
 volatile bool audioRestartRequested = true;
+
+#if !defined(BOARD_HAS_PSRAM)
+extern "C" void *__malloc_heap_psram(size_t size) {
+  if (size == 0) {
+    return nullptr;
+  }
+  void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (ptr == nullptr) {
+    ptr = heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+  }
+  return ptr;
+}
+#endif
 
 bool radarSpriteActive = false;
 int radarSpriteWidth = 0;
@@ -493,6 +507,8 @@ void requestAudioRestart() {
 void initializeAudioPlayback() {
   audio.setPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
   int volume = constrain((int)AUDIO_STREAM_VOLUME, 0, 21);
+  audio.setInBufferSize(12 * 1024);
+  audio.forceMono(true);
   audio.setVolume(volume);
   configureAudioCallbacks(audio);
 
