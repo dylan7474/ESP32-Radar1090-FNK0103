@@ -7,6 +7,9 @@
 #include <math.h>
 #include <cstring>
 #include <EEPROM.h>
+#include <Audio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "config.h"
 #include "plane_icon.h"
@@ -91,8 +94,19 @@ static const int EEPROM_SIZE = 4;
 
 static const int COMPASS_LABEL_COUNT = 4;
 
+static const unsigned long AUDIO_RETRY_INTERVAL_MS = 5000;
+static const unsigned long AUDIO_TASK_IDLE_DELAY_MS = 5;
+static const unsigned long AUDIO_RECONNECT_BACKOFF_MS = 1000;
+static const int AUDIO_TASK_STACK_SIZE = 8192;
+static const UBaseType_t AUDIO_TASK_PRIORITY = 2;
+static const BaseType_t AUDIO_TASK_CORE = 0;
+
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite radarSprite = TFT_eSprite(&tft);
+
+Audio audio;
+TaskHandle_t audioTaskHandle = nullptr;
+volatile bool audioRestartRequested = true;
 
 bool radarSpriteActive = false;
 int radarSpriteWidth = 0;
@@ -359,6 +373,110 @@ bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 void rotateRadarOrientation();
 
+void initializeAudioPlayback();
+void audioStreamTask(void *param);
+void requestAudioRestart();
+void audio_info(const char *info);
+void audio_showstreamtitle(const char *info);
+void audio_eof_mp3(const char *info);
+
+void requestAudioRestart() {
+  audioRestartRequested = true;
+}
+
+void initializeAudioPlayback() {
+  audio.setPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
+  int volume = constrain((int)AUDIO_STREAM_VOLUME, 0, 21);
+  audio.setVolume(volume);
+
+  if (audioTaskHandle == nullptr) {
+    BaseType_t result = xTaskCreatePinnedToCore(audioStreamTask, "AudioStream", AUDIO_TASK_STACK_SIZE,
+                                                nullptr, AUDIO_TASK_PRIORITY, &audioTaskHandle, AUDIO_TASK_CORE);
+    if (result != pdPASS) {
+      Serial.println("Failed to create audio streaming task.");
+    }
+  }
+}
+
+void audioStreamTask(void *param) {
+  (void)param;
+  unsigned long lastAttempt = 0;
+  wl_status_t lastStatus = WL_NO_SHIELD;
+
+  for (;;) {
+    wl_status_t status = WiFi.status();
+    if (status != lastStatus) {
+      if (status == WL_CONNECTED) {
+        Serial.println("Audio: WiFi connected, preparing to (re)start stream.");
+        requestAudioRestart();
+      } else {
+        if (audio.isRunning()) {
+          audio.stopSong();
+        }
+        Serial.println("Audio: WiFi disconnected.");
+        lastAttempt = 0;
+      }
+      lastStatus = status;
+    }
+
+    if (status == WL_CONNECTED) {
+      if (audioRestartRequested) {
+        audio.stopSong();
+        lastAttempt = 0;
+        audioRestartRequested = false;
+        vTaskDelay(pdMS_TO_TICKS(AUDIO_RECONNECT_BACKOFF_MS));
+      }
+
+      if (audio.isRunning()) {
+        audio.loop();
+        if (audio.isRunning()) {
+          vTaskDelay(pdMS_TO_TICKS(1));
+        } else {
+          vTaskDelay(pdMS_TO_TICKS(AUDIO_TASK_IDLE_DELAY_MS));
+        }
+        continue;
+      }
+
+      unsigned long now = millis();
+      if (lastAttempt == 0 || (now - lastAttempt) >= AUDIO_RETRY_INTERVAL_MS) {
+        Serial.println("Audio: attempting to connect to stream.");
+        bool ok = audio.connecttohost(AUDIO_STREAM_URL);
+        if (!ok) {
+          Serial.println("Audio: stream connection failed.");
+        }
+        lastAttempt = now;
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(100));
+      }
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(AUDIO_TASK_IDLE_DELAY_MS));
+  }
+}
+
+void audio_info(const char *info) {
+  if (info != nullptr) {
+    Serial.printf("Audio info: %s\n", info);
+  }
+}
+
+void audio_showstreamtitle(const char *info) {
+  if (info != nullptr) {
+    Serial.printf("Audio stream title: %s\n", info);
+  }
+}
+
+void audio_eof_mp3(const char *info) {
+  if (info != nullptr) {
+    Serial.printf("Audio: stream ended (%s), requesting restart.\n", info);
+  } else {
+    Serial.println("Audio: stream ended, requesting restart.");
+  }
+  requestAudioRestart();
+}
+
 uint16_t applyAircraftIconIntensity(uint16_t baseColor, uint8_t intensity) {
   uint16_t r = (baseColor >> 11) & 0x1F;
   uint16_t g = (baseColor >> 5) & 0x3F;
@@ -546,6 +664,7 @@ void setup() {
   closestAircraft.squawk = "";
   updateDisplay();
 
+  initializeAudioPlayback();
   connectWiFi();
   if (WiFi.status() == WL_CONNECTED) {
     fetchAircraft();
@@ -1159,6 +1278,7 @@ void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("WiFi connected.");
     WiFi.setSleep(false);
+    requestAudioRestart();
   } else {
     Serial.println("WiFi connection failed.");
   }
@@ -1615,6 +1735,11 @@ void drawButton(int index) {
 }
 
 bool readTouchPoint(int &screenX, int &screenY) {
+#if !defined(TOUCH_CS)
+  (void)screenX;
+  (void)screenY;
+  return false;
+#else
   uint16_t rawX = 0;
   uint16_t rawY = 0;
   if (!tft.getTouchRaw(&rawX, &rawY)) {
@@ -1671,6 +1796,7 @@ bool readTouchPoint(int &screenX, int &screenY) {
   screenX = (int)mappedX;
   screenY = (int)mappedY;
   return true;
+#endif
 }
 
 void rotateRadarOrientation() {

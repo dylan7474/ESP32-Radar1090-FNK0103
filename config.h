@@ -18,4 +18,8 @@
 #define I2S_LRCLK_PIN 16
 #define I2S_DOUT_PIN  27
 
+// Audio stream configuration
+#define AUDIO_STREAM_URL "http://192.168.50.4:8000/airband.mp3"
+#define AUDIO_STREAM_VOLUME 18  // Valid range 0 (mute) to 21 (max)
+
 #endif // CONFIG_H
