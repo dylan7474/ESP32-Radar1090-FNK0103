@@ -425,8 +425,7 @@ struct audio_has_setEofCallback<
     : std::true_type {};
 
 template <typename AudioType>
-typename std::enable_if<audio_player_has_msg_type<AudioType>::value>::type
-configureAudioCallbacks(AudioType &player) {
+void configureAudioCallbacksImpl(AudioType &player, std::true_type) {
   (void)player;
   AudioType::audio_info_callback = [](typename AudioType::msg_t msg) {
     const char *text = msg.msg;
@@ -473,14 +472,18 @@ template <typename AudioType>
 void trySetAudioEofCallback(AudioType &, std::false_type) {}
 
 template <typename AudioType>
-typename std::enable_if<!audio_player_has_msg_type<AudioType>::value>::type
-configureAudioCallbacks(AudioType &player) {
+void configureAudioCallbacksImpl(AudioType &player, std::false_type) {
   trySetAudioInfoCallback(
       player, std::integral_constant<bool, audio_has_setAudioInfoCallback<AudioType>::value>{});
   trySetAudioStreamTitleCallback(
       player, std::integral_constant<bool, audio_has_setShowStreamTitleCallback<AudioType>::value>{});
   trySetAudioEofCallback(
       player, std::integral_constant<bool, audio_has_setEofCallback<AudioType>::value>{});
+}
+
+template <typename AudioType>
+void configureAudioCallbacks(AudioType &player) {
+  configureAudioCallbacksImpl(player, audio_player_has_msg_type<AudioType>{});
 }
 
 void requestAudioRestart() {
