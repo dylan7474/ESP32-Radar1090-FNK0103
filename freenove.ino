@@ -439,6 +439,40 @@ struct audio_has_setEofCallback<
     : std::true_type {};
 
 template <typename AudioType>
+auto trySetAudioInputBufferSizeImpl(AudioType &player, size_t size, int)
+    -> decltype(player.setInBufferSize(size), bool()) {
+  player.setInBufferSize(size);
+  return true;
+}
+
+template <typename AudioType>
+auto trySetAudioInputBufferSizeImpl(AudioType &player, size_t size, long)
+    -> decltype(player.setBufferSize(size), bool()) {
+  player.setBufferSize(size);
+  return true;
+}
+
+template <typename AudioType>
+auto trySetAudioInputBufferSizeImpl(AudioType &player, size_t size, char)
+    -> decltype(player.inBufferSize = size, bool()) {
+  player.inBufferSize = size;
+  return true;
+}
+
+inline bool trySetAudioInputBufferSizeImpl(...) { return false; }
+
+template <typename AudioType>
+void trySetAudioInputBufferSize(AudioType &player, size_t size) {
+  if (trySetAudioInputBufferSizeImpl(player, size, 0)) {
+    return;
+  }
+  if (trySetAudioInputBufferSizeImpl(player, size, 0L)) {
+    return;
+  }
+  (void)trySetAudioInputBufferSizeImpl(player, size, '\0');
+}
+
+template <typename AudioType>
 void configureAudioCallbacksImpl(AudioType &player, std::true_type) {
   (void)player;
   AudioType::audio_info_callback = [](typename AudioType::msg_t msg) {
@@ -507,7 +541,7 @@ void requestAudioRestart() {
 void initializeAudioPlayback() {
   audio.setPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
   int volume = constrain((int)AUDIO_STREAM_VOLUME, 0, 21);
-  audio.setInBufferSize(12 * 1024);
+  trySetAudioInputBufferSize(audio, AUDIO_STREAM_BUFFER_SIZE);
   audio.forceMono(true);
   audio.setVolume(volume);
   configureAudioCallbacks(audio);
