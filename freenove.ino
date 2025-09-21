@@ -386,20 +386,20 @@ void audio_showstreamtitle(const char *info);
 void audio_eof_mp3(const char *info);
 
 template <typename...>
-using void_t = void;
+using audio_void_t = void;
 
 template <typename T, typename = void>
 struct audio_has_msg_t : std::false_type {};
 
 template <typename T>
-struct audio_has_msg_t<T, void_t<typename T::msg_t>> : std::true_type {};
+struct audio_has_msg_t<T, audio_void_t<typename T::msg_t>> : std::true_type {};
 
 template <typename T, typename = void>
 struct audio_has_setAudioInfoCallback : std::false_type {};
 
 template <typename T>
 struct audio_has_setAudioInfoCallback<
-    T, void_t<decltype(std::declval<T &>().setAudioInfoCallback(audio_info))>>
+    T, audio_void_t<decltype(std::declval<T &>().setAudioInfoCallback(audio_info))>>
     : std::true_type {};
 
 template <typename T, typename = void>
@@ -407,7 +407,7 @@ struct audio_has_setShowStreamTitleCallback : std::false_type {};
 
 template <typename T>
 struct audio_has_setShowStreamTitleCallback<
-    T, void_t<decltype(
+    T, audio_void_t<decltype(
            std::declval<T &>().setShowStreamTitleCallback(audio_showstreamtitle))>>
     : std::true_type {};
 
@@ -416,7 +416,7 @@ struct audio_has_setEofCallback : std::false_type {};
 
 template <typename T>
 struct audio_has_setEofCallback<
-    T, void_t<decltype(std::declval<T &>().setEofCallback(audio_eof_mp3))>>
+    T, audio_void_t<decltype(std::declval<T &>().setEofCallback(audio_eof_mp3))>>
     : std::true_type {};
 
 template <typename AudioType>
