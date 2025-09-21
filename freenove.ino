@@ -7,6 +7,8 @@
 #include <math.h>
 #include <cstring>
 #include <EEPROM.h>
+#include <type_traits>
+#include <utility>
 #ifndef AUDIO_USE_MP3
 #define AUDIO_USE_MP3
 #endif
@@ -383,6 +385,99 @@ void audio_info(const char *info);
 void audio_showstreamtitle(const char *info);
 void audio_eof_mp3(const char *info);
 
+template <typename...>
+using void_t = void;
+
+template <typename T, typename = void>
+struct audio_has_msg_t : std::false_type {};
+
+template <typename T>
+struct audio_has_msg_t<T, void_t<typename T::msg_t>> : std::true_type {};
+
+template <typename T, typename = void>
+struct audio_has_setAudioInfoCallback : std::false_type {};
+
+template <typename T>
+struct audio_has_setAudioInfoCallback<
+    T, void_t<decltype(std::declval<T &>().setAudioInfoCallback(audio_info))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct audio_has_setShowStreamTitleCallback : std::false_type {};
+
+template <typename T>
+struct audio_has_setShowStreamTitleCallback<
+    T, void_t<decltype(
+           std::declval<T &>().setShowStreamTitleCallback(audio_showstreamtitle))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct audio_has_setEofCallback : std::false_type {};
+
+template <typename T>
+struct audio_has_setEofCallback<
+    T, void_t<decltype(std::declval<T &>().setEofCallback(audio_eof_mp3))>>
+    : std::true_type {};
+
+template <typename AudioType>
+typename std::enable_if<audio_has_msg_t<AudioType>::value>::type
+configureAudioCallbacks(AudioType &player) {
+  (void)player;
+  AudioType::audio_info_callback = [](typename AudioType::msg_t msg) {
+    const char *text = msg.msg;
+    switch (msg.e) {
+    case AudioType::evt_streamtitle:
+      if (text != nullptr && text[0] != '\0') {
+        audio_showstreamtitle(text);
+      }
+      break;
+    case AudioType::evt_eof:
+      audio_eof_mp3(text);
+      break;
+    default:
+      if (text != nullptr && text[0] != '\0') {
+        audio_info(text);
+      }
+      break;
+    }
+  };
+}
+
+template <typename AudioType>
+void trySetAudioInfoCallback(AudioType &player, std::true_type) {
+  player.setAudioInfoCallback(audio_info);
+}
+
+template <typename AudioType>
+void trySetAudioInfoCallback(AudioType &, std::false_type) {}
+
+template <typename AudioType>
+void trySetAudioStreamTitleCallback(AudioType &player, std::true_type) {
+  player.setShowStreamTitleCallback(audio_showstreamtitle);
+}
+
+template <typename AudioType>
+void trySetAudioStreamTitleCallback(AudioType &, std::false_type) {}
+
+template <typename AudioType>
+void trySetAudioEofCallback(AudioType &player, std::true_type) {
+  player.setEofCallback(audio_eof_mp3);
+}
+
+template <typename AudioType>
+void trySetAudioEofCallback(AudioType &, std::false_type) {}
+
+template <typename AudioType>
+typename std::enable_if<!audio_has_msg_t<AudioType>::value>::type
+configureAudioCallbacks(AudioType &player) {
+  trySetAudioInfoCallback(
+      player, std::integral_constant<bool, audio_has_setAudioInfoCallback<AudioType>::value>{});
+  trySetAudioStreamTitleCallback(
+      player, std::integral_constant<bool, audio_has_setShowStreamTitleCallback<AudioType>::value>{});
+  trySetAudioEofCallback(
+      player, std::integral_constant<bool, audio_has_setEofCallback<AudioType>::value>{});
+}
+
 void requestAudioRestart() {
   audioRestartRequested = true;
 }
@@ -391,9 +486,7 @@ void initializeAudioPlayback() {
   audio.setPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
   int volume = constrain((int)AUDIO_STREAM_VOLUME, 0, 21);
   audio.setVolume(volume);
-  audio.setAudioInfoCallback(audio_info);
-  audio.setShowStreamTitleCallback(audio_showstreamtitle);
-  audio.setEofCallback(audio_eof_mp3);
+  configureAudioCallbacks(audio);
 
   if (audioTaskHandle == nullptr) {
     BaseType_t result = xTaskCreatePinnedToCore(audioStreamTask, "AudioStream", AUDIO_TASK_STACK_SIZE,
