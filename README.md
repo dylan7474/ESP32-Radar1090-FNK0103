@@ -2,16 +2,6 @@
 
 An Arduino-compatible sketch for the Freenove ESP32 4.0" display board (FNK0103) that connects to a dump1090 server and renders a touch-driven radar status panel on the integrated TFT. The sweeping radar visualisation lists the closest aircraft, highlights inbound traffic, and summarises flight details so you can keep an eye on nearby traffic at a glance.
 
-Remember to edit the libraries/TFT_eSPI/User_Setup_Select.h as below
-
-//#define FNK0086A_2P8_240x320_ST7789 
-//#define FNK0102A_1P14_135x240_ST7789 
-//#define FNK0103B_2P8_240x320_ST7789  
-//#define FNK0103F_2P8_240x320_ILI9341 
-//#define FNK0103L_3P2_240x320_ST7789  
-//#define FNK0103N_3P5_320x480_ST7796  
-#define FNK0103S_4P0_320x480_ST7796 
-
 ## Features
 
 - **Animated radar scope** with fading contacts, compass markings, WiFi signal indicator and configurable orientation.
@@ -27,6 +17,16 @@ Install the following libraries in the Arduino IDE (or via `arduino-cli`) before
 - **ESP32 board support** (`esp32` by Espressif) – provides WiFi and HTTPClient functionality.
 - **ArduinoJson** – parses the `aircraft.json` feed from dump1090.
 - **TFT_eSPI** – drives the 4" IPS TFT included with the Freenove board. Configure the library's `User_Setup_Select.h`/`User_Setup.h` files for the FNK0103 before compiling.
+
+Remember to edit the libraries/TFT_eSPI/User_Setup_Select.h as below
+
+//#define FNK0086A_2P8_240x320_ST7789 
+//#define FNK0102A_1P14_135x240_ST7789 
+//#define FNK0103B_2P8_240x320_ST7789  
+//#define FNK0103F_2P8_240x320_ILI9341 
+//#define FNK0103L_3P2_240x320_ST7789  
+//#define FNK0103N_3P5_320x480_ST7796  
+#define FNK0103S_4P0_320x480_ST7796 
 
 ## Hardware Connections
 
@@ -136,6 +136,7 @@ echo "   arduino-cli compile --fqbn esp32:esp32:esp32 sketches/freenove"
 The command completes successfully when the required libraries (`ArduinoJson`, `TFT_eSPI`, etc.) are installed. A thin wrapper
 sketch lives in `sketches/freenove` so that `arduino-cli` sees a folder/file pair with matching names while still keeping the
 primary source at the repository root for IDE users.
+
 
 
 
