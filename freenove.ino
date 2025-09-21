@@ -394,10 +394,10 @@ template <typename... Ts>
 using audio_detect_void_t = typename audio_make_void<Ts...>::type;
 
 template <typename T, typename = void>
-struct audio_has_msg_t : std::false_type {};
+struct audio_player_has_msg_type : std::false_type {};
 
 template <typename T>
-struct audio_has_msg_t<T, audio_detect_void_t<typename T::msg_t>> : std::true_type {};
+struct audio_player_has_msg_type<T, audio_detect_void_t<typename T::msg_t>> : std::true_type {};
 
 template <typename T, typename = void>
 struct audio_has_setAudioInfoCallback : std::false_type {};
@@ -425,7 +425,7 @@ struct audio_has_setEofCallback<
     : std::true_type {};
 
 template <typename AudioType>
-typename std::enable_if<audio_has_msg_t<AudioType>::value>::type
+typename std::enable_if<audio_player_has_msg_type<AudioType>::value>::type
 configureAudioCallbacks(AudioType &player) {
   (void)player;
   AudioType::audio_info_callback = [](typename AudioType::msg_t msg) {
@@ -473,7 +473,7 @@ template <typename AudioType>
 void trySetAudioEofCallback(AudioType &, std::false_type) {}
 
 template <typename AudioType>
-typename std::enable_if<!audio_has_msg_t<AudioType>::value>::type
+typename std::enable_if<!audio_player_has_msg_type<AudioType>::value>::type
 configureAudioCallbacks(AudioType &player) {
   trySetAudioInfoCallback(
       player, std::integral_constant<bool, audio_has_setAudioInfoCallback<AudioType>::value>{});
