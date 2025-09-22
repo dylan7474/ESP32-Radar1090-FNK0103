@@ -209,7 +209,32 @@ TaskHandle_t radarTaskHandle = nullptr;
 volatile bool radarFrameRequested = false;
 bool radarTaskStarted = false;
 SemaphoreHandle_t displayMutex = nullptr;
+SemaphoreHandle_t audioMutex = nullptr;
 bool amplifierStateInitialised = false;
+
+class ScopedLock {
+ public:
+  ScopedLock(SemaphoreHandle_t semaphore, TickType_t waitTicks)
+      : semaphore_(semaphore), locked_(false) {
+    if (semaphore_ == nullptr) {
+      locked_ = true;
+    } else if (xSemaphoreTake(semaphore_, waitTicks) == pdTRUE) {
+      locked_ = true;
+    }
+  }
+
+  ~ScopedLock() {
+    if (semaphore_ != nullptr && locked_) {
+      xSemaphoreGive(semaphore_);
+    }
+  }
+
+  bool isLocked() const { return locked_; }
+
+ private:
+  SemaphoreHandle_t semaphore_;
+  bool locked_;
+};
 
 struct InfoTableRow {
   String label;
@@ -392,23 +417,30 @@ void setAmplifierState(bool enable) {
 }
 
 void cleanupStream() {
-  if (mp3) {
-    if (mp3->isRunning()) {
-      mp3->stop();
+  {
+    ScopedLock audioLock(audioMutex, portMAX_DELAY);
+    if (!audioLock.isLocked()) {
+      return;
     }
-    delete mp3;
-    mp3 = nullptr;
-  }
 
-  if (streamFile) {
-    streamFile->close();
-    delete streamFile;
-    streamFile = nullptr;
-  }
+    if (mp3) {
+      if (mp3->isRunning()) {
+        mp3->stop();
+      }
+      delete mp3;
+      mp3 = nullptr;
+    }
 
-  if (audioOutput) {
-    delete audioOutput;
-    audioOutput = nullptr;
+    if (streamFile) {
+      streamFile->close();
+      delete streamFile;
+      streamFile = nullptr;
+    }
+
+    if (audioOutput) {
+      delete audioOutput;
+      audioOutput = nullptr;
+    }
   }
 
   setAmplifierState(false);
@@ -532,31 +564,45 @@ void startStreaming() {
   drawButtons();
 }
 
-void serviceAudioDecoder(uint32_t timeBudgetUs) {
+void serviceAudioDecoder(uint32_t timeBudgetUs, bool nonBlocking) {
   if (!streamPlaying || !mp3) {
     return;
   }
 
-  if (!mp3->isRunning()) {
-    return;
-  }
+  const char *stopMessage = nullptr;
 
-  uint32_t startMicros = micros();
-  while (streamPlaying && mp3 && mp3->isRunning()) {
-    if (!mp3->loop()) {
-      Serial.println("[STREAM] Decoder loop returned false.");
-      stopStreamingWithStatus(String("Stream error"));
+  {
+    ScopedLock audioLock(audioMutex, nonBlocking ? 0 : portMAX_DELAY);
+    if (!audioLock.isLocked()) {
       return;
     }
 
-    if (timeBudgetUs > 0) {
-      uint32_t elapsed = micros() - startMicros;
-      if (elapsed >= timeBudgetUs) {
-        break;
-      }
+    if (!streamPlaying || !mp3 || !mp3->isRunning()) {
+      return;
     }
 
-    taskYIELD();
+    AudioGeneratorMP3 *decoder = mp3;
+    uint32_t startMicros = micros();
+    while (streamPlaying && mp3 == decoder && decoder->isRunning()) {
+      if (!decoder->loop()) {
+        Serial.println("[STREAM] Decoder loop returned false.");
+        stopMessage = "Stream error";
+        break;
+      }
+
+      if (timeBudgetUs > 0) {
+        uint32_t elapsed = micros() - startMicros;
+        if (elapsed >= timeBudgetUs) {
+          break;
+        }
+      }
+
+      taskYIELD();
+    }
+  }
+
+  if (stopMessage != nullptr) {
+    stopStreamingWithStatus(String(stopMessage));
   }
 }
 
@@ -573,7 +619,7 @@ void serviceAudioDuringRadarDraw() {
   }
 
   lastServiceMicros = now;
-  serviceAudioDecoder(AUDIO_DRAW_SERVICE_BUDGET_US);
+  serviceAudioDecoder(AUDIO_DRAW_SERVICE_BUDGET_US, true);
 }
 
 // --- Function Prototypes ---
@@ -601,7 +647,7 @@ bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 void rotateRadarOrientation();
 void radarTask(void *param);
-void serviceAudioDecoder(uint32_t timeBudgetUs = AUDIO_SERVICE_TIME_SLICE_US);
+void serviceAudioDecoder(uint32_t timeBudgetUs = AUDIO_SERVICE_TIME_SLICE_US, bool nonBlocking = false);
 void serviceAudioDuringRadarDraw();
 
 class ScopedRecursiveLock {
@@ -812,6 +858,11 @@ void setup() {
   displayMutex = xSemaphoreCreateRecursiveMutex();
   if (displayMutex == nullptr) {
     Serial.println("[RADAR] Failed to create display mutex.");
+  }
+
+  audioMutex = xSemaphoreCreateMutex();
+  if (audioMutex == nullptr) {
+    Serial.println("[STREAM] Failed to create audio mutex.");
   }
 
   if (AUDIO_AMP_ENABLE_PIN >= 0) {
