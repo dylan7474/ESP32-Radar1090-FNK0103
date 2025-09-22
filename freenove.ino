@@ -40,6 +40,8 @@ static const unsigned long RADAR_SWEEP_PERIOD_MS = 4000;
 static const unsigned long RADAR_FADE_DURATION_MS = 4000;
 static const unsigned long RADAR_FRAME_INTERVAL_MS = 40;
 static const uint32_t AUDIO_SERVICE_TIME_SLICE_US = 6000;
+static const uint32_t AUDIO_DRAW_SERVICE_INTERVAL_US = 1500;
+static const uint32_t AUDIO_DRAW_SERVICE_BUDGET_US = AUDIO_SERVICE_TIME_SLICE_US / 2;
 static const double RADAR_SWEEP_WIDTH_DEG = 3.0;
 static const uint16_t COLOR_RADAR_SWEEP = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_ACTIVE = TFT_DARKGREEN;
@@ -558,6 +560,22 @@ void serviceAudioDecoder(uint32_t timeBudgetUs) {
   }
 }
 
+void serviceAudioDuringRadarDraw() {
+  if (!streamPlaying || !mp3 || !mp3->isRunning()) {
+    return;
+  }
+
+  static uint32_t lastServiceMicros = 0;
+  uint32_t now = micros();
+  uint32_t elapsed = now - lastServiceMicros;
+  if (elapsed < AUDIO_DRAW_SERVICE_INTERVAL_US) {
+    return;
+  }
+
+  lastServiceMicros = now;
+  serviceAudioDecoder(AUDIO_DRAW_SERVICE_BUDGET_US);
+}
+
 // --- Function Prototypes ---
 void drawStaticLayout();
 void updateDisplay();
@@ -584,6 +602,7 @@ void handleTouch();
 void rotateRadarOrientation();
 void radarTask(void *param);
 void serviceAudioDecoder(uint32_t timeBudgetUs = AUDIO_SERVICE_TIME_SLICE_US);
+void serviceAudioDuringRadarDraw();
 
 class ScopedRecursiveLock {
  public:
@@ -648,7 +667,11 @@ void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, flo
   float halfHeight = (PLANE_ICON_HEIGHT - 1) * 0.5f;
 
   for (int y = 0; y < PLANE_ICON_HEIGHT; ++y) {
+    serviceAudioDuringRadarDraw();
     for (int x = 0; x < PLANE_ICON_WIDTH; ++x) {
+      if ((x & 0x07) == 0) {
+        serviceAudioDuringRadarDraw();
+      }
       int index = y * PLANE_ICON_WIDTH + x;
       uint8_t alpha = pgm_read_byte(&PLANE_ICON_ALPHA[index]);
       if (alpha < 16) {
@@ -672,6 +695,8 @@ void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, flo
       gfx.drawPixel(drawX, drawY, tintedColor);
     }
   }
+
+  serviceAudioDuringRadarDraw();
 }
 
 template <typename GFX>
