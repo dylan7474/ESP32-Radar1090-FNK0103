@@ -7,6 +7,12 @@
 #include <math.h>
 #include <cstring>
 #include <EEPROM.h>
+#include <AudioFileSourceICYStream.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioOutputI2S.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include "config.h"
 #include "plane_icon.h"
@@ -44,7 +50,7 @@ static const int COMPASS_LABEL_OFFSET = 16;
 static const int COMPASS_TEXT_SIZE = 2;
 static const float AIRCRAFT_ICON_SIZE = 6.0f;
 
-static const int BUTTON_COUNT = 2;
+static const int BUTTON_COUNT = 3;
 static const int BUTTON_HEIGHT = 48;
 static const int BUTTON_SPACING = 12;
 static const unsigned long TOUCH_DEBOUNCE_MS = 250;
@@ -119,7 +125,8 @@ unsigned long lastFetchTime = 0;
 unsigned long lastWifiAttempt = 0;
 unsigned long lastSuccessfulFetch = 0;
 unsigned long radarSweepStart = 0;
-unsigned long lastRadarFrameTime = 0;
+volatile unsigned long lastRadarFrameTime = 0;
+volatile bool radarFrameReadyToPush = false;
 
 int radarRangeIndex = 0;
 int alertRangeIndex = 0;
@@ -168,6 +175,7 @@ static const int AIRSPACE_ZONE_COUNT = sizeof(AIRSPACE_ZONES) / sizeof(AIRSPACE_
 enum ButtonType {
   BUTTON_RADAR_RANGE,
   BUTTON_ALERT_RANGE,
+  BUTTON_STREAM_TOGGLE,
   BUTTON_UNKNOWN
 };
 
@@ -186,6 +194,19 @@ unsigned long lastTouchTime = 0;
 
 int activeContactIndex = -1;
 bool infoPanelDirty = true;
+bool streamPlaying = false;
+String streamStatusMessage = "Stream stopped";
+
+AudioGeneratorMP3 *mp3 = nullptr;
+AudioFileSourceICYStream *streamFile = nullptr;
+AudioOutputI2S *audioOutput = nullptr;
+
+bool amplifierEnabled = false;
+TaskHandle_t radarTaskHandle = nullptr;
+volatile bool radarFrameRequested = false;
+bool radarTaskStarted = false;
+SemaphoreHandle_t displayMutex = nullptr;
+bool amplifierStateInitialised = false;
 
 struct InfoTableRow {
   String label;
@@ -233,6 +254,12 @@ void renderInfoPanel();
 bool setActiveContact(int index);
 bool clearActiveContact();
 bool ensureActiveContactFresh(unsigned long now);
+void startStreaming();
+void stopStreaming();
+void stopStreamingWithStatus(const String &message);
+void cleanupStream();
+void setAmplifierState(bool enable);
+void setStreamStatus(const String &status);
 
 void initializeRangeIndices() {
   bool loadedFromEeprom = false;
@@ -320,6 +347,13 @@ void handleRangeButton(ButtonType type) {
     cycleRadarRange();
   } else if (type == BUTTON_ALERT_RANGE) {
     cycleAlertRange();
+  } else if (type == BUTTON_STREAM_TOGGLE) {
+    if (streamPlaying) {
+      stopStreaming();
+    } else {
+      startStreaming();
+    }
+    return;
   } else {
     return;
   }
@@ -335,11 +369,172 @@ void handleRangeButton(ButtonType type) {
   lastFetchTime = millis();
 }
 
+void setStreamStatus(const String &status) {
+  streamStatusMessage = status;
+  infoPanelDirty = true;
+}
+
+void setAmplifierState(bool enable) {
+  if (AUDIO_AMP_ENABLE_PIN < 0) {
+    return;
+  }
+  if (!amplifierStateInitialised || amplifierEnabled != enable) {
+    digitalWrite(AUDIO_AMP_ENABLE_PIN, enable ? LOW : HIGH);
+    if (!enable) {
+      delay(5);
+    }
+    amplifierEnabled = enable;
+    amplifierStateInitialised = true;
+  }
+}
+
+void cleanupStream() {
+  if (mp3) {
+    if (mp3->isRunning()) {
+      mp3->stop();
+    }
+    delete mp3;
+    mp3 = nullptr;
+  }
+
+  if (streamFile) {
+    streamFile->close();
+    delete streamFile;
+    streamFile = nullptr;
+  }
+
+  if (audioOutput) {
+    delete audioOutput;
+    audioOutput = nullptr;
+  }
+
+  setAmplifierState(false);
+}
+
+void stopStreamingWithStatus(const String &message) {
+  cleanupStream();
+  if (streamPlaying) {
+    Serial.println("[STREAM] Stream stopped.");
+  }
+  streamPlaying = false;
+  setStreamStatus(message);
+  drawButtons();
+}
+
+void stopStreaming() {
+  stopStreamingWithStatus(String("Stream stopped"));
+}
+
+void startStreaming() {
+  Serial.println("[STREAM] Start requested.");
+  if (streamPlaying) {
+    Serial.println("[STREAM] Stream already running.");
+    drawButtons();
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[STREAM] Cannot start stream - WiFi not connected.");
+    setStreamStatus("WiFi required");
+    drawButtons();
+    return;
+  }
+
+  setStreamStatus("Connecting...");
+  cleanupStream();
+
+  streamFile = new AudioFileSourceICYStream();
+  if (!streamFile) {
+    Serial.println("[STREAM] Failed to allocate stream source.");
+    setStreamStatus("No memory");
+    drawButtons();
+    return;
+  }
+
+  if (!streamFile->open(STREAM_URL)) {
+    Serial.println("[STREAM] Failed to open stream URL.");
+    cleanupStream();
+    setStreamStatus("Stream failed");
+    drawButtons();
+    return;
+  }
+
+  Serial.print("[STREAM] Connected to stream: ");
+  Serial.println(STREAM_URL);
+
+  bool useExternalI2S = I2S_BCLK_PIN >= 0 && I2S_LRCLK_PIN >= 0 && I2S_DOUT_PIN >= 0;
+  if (useExternalI2S) {
+    Serial.print("[STREAM] Configuring external I2S pins BCLK=");
+    Serial.print(I2S_BCLK_PIN);
+    Serial.print(", LRCLK=");
+    Serial.print(I2S_LRCLK_PIN);
+    Serial.print(", DOUT=");
+    Serial.println(I2S_DOUT_PIN);
+    audioOutput = new AudioOutputI2S();
+  } else {
+    Serial.print("[STREAM] Using internal DAC on GPIO");
+    Serial.println(I2S_DOUT_PIN);
+    audioOutput = new AudioOutputI2S(0, 1);
+  }
+
+  if (!audioOutput) {
+    Serial.println("[STREAM] Failed to allocate audio output.");
+    cleanupStream();
+    setStreamStatus("Audio init failed");
+    drawButtons();
+    return;
+  }
+
+  bool pinoutOk = false;
+  if (useExternalI2S) {
+    pinoutOk = audioOutput->SetPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
+  } else if (I2S_DOUT_PIN >= 0) {
+    pinoutOk = audioOutput->SetPinout(-1, -1, I2S_DOUT_PIN);
+  } else {
+    Serial.println("[STREAM] Invalid DAC pin configuration. Set I2S_DOUT_PIN.");
+  }
+
+  if (!pinoutOk) {
+    Serial.println("[STREAM] Audio pin configuration failed.");
+    cleanupStream();
+    setStreamStatus("Audio pin error");
+    drawButtons();
+    return;
+  }
+
+  audioOutput->SetOutputModeMono(true);
+  audioOutput->SetGain(1.0f);
+  setAmplifierState(true);
+
+  mp3 = new AudioGeneratorMP3();
+  if (!mp3) {
+    Serial.println("[STREAM] Failed to allocate MP3 decoder.");
+    cleanupStream();
+    setStreamStatus("Decoder error");
+    drawButtons();
+    return;
+  }
+
+  if (!mp3->begin(streamFile, audioOutput)) {
+    Serial.println("[STREAM] MP3 decoder failed to start.");
+    cleanupStream();
+    setStreamStatus("Decoder error");
+    drawButtons();
+    return;
+  }
+
+  streamPlaying = true;
+  setStreamStatus("Streaming");
+  Serial.println("[STREAM] Streaming started.");
+  drawButtons();
+}
+
 // --- Function Prototypes ---
 void drawStaticLayout();
 void updateDisplay();
 void drawInfoLine(int index, const String &text);
 void drawRadar();
+void renderRadarFrame(bool pushToDisplay);
 void resetRadarContacts();
 void setupRadarSprite();
 void connectWiFi();
@@ -358,6 +553,31 @@ void drawButton(int index);
 bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 void rotateRadarOrientation();
+void radarTask(void *param);
+
+class ScopedRecursiveLock {
+ public:
+  explicit ScopedRecursiveLock(SemaphoreHandle_t semaphore)
+      : semaphore_(semaphore), locked_(false) {
+    if (semaphore_ != nullptr) {
+      if (xSemaphoreTakeRecursive(semaphore_, portMAX_DELAY) == pdTRUE) {
+        locked_ = true;
+      }
+    }
+  }
+
+  ~ScopedRecursiveLock() {
+    if (locked_ && semaphore_ != nullptr) {
+      xSemaphoreGiveRecursive(semaphore_);
+    }
+  }
+
+  bool isLocked() const { return locked_; }
+
+ private:
+  SemaphoreHandle_t semaphore_;
+  bool locked_;
+};
 
 uint16_t applyAircraftIconIntensity(uint16_t baseColor, uint8_t intensity) {
   uint16_t r = (baseColor >> 11) & 0x1F;
@@ -533,6 +753,20 @@ void setup() {
   tft.begin();
   displayRotation = 0;
   tft.setRotation(displayRotation);
+
+  displayMutex = xSemaphoreCreateRecursiveMutex();
+  if (displayMutex == nullptr) {
+    Serial.println("[RADAR] Failed to create display mutex.");
+  }
+
+  if (AUDIO_AMP_ENABLE_PIN >= 0) {
+    pinMode(AUDIO_AMP_ENABLE_PIN, OUTPUT);
+    digitalWrite(AUDIO_AMP_ENABLE_PIN, HIGH);
+    setAmplifierState(false);
+    Serial.print("[STREAM] Amplifier control initialised on GPIO");
+    Serial.println(AUDIO_AMP_ENABLE_PIN);
+  }
+
   eepromInitialized = EEPROM.begin(EEPROM_SIZE);
   if (!eepromInitialized) {
     Serial.println("EEPROM init failed");
@@ -546,6 +780,23 @@ void setup() {
   closestAircraft.squawk = "";
   updateDisplay();
 
+  BaseType_t radarTaskStatus = xTaskCreatePinnedToCore(
+      radarTask,
+      "RadarTask",
+      6144,
+      nullptr,
+      1,
+      &radarTaskHandle,
+      0);
+  if (radarTaskStatus == pdPASS) {
+    radarTaskStarted = true;
+    xTaskNotifyGive(radarTaskHandle);
+    Serial.println("[RADAR] Radar render task started on core 0.");
+  } else {
+    radarTaskHandle = nullptr;
+    Serial.println("[RADAR] Failed to start radar render task; falling back to loop updates.");
+  }
+
   connectWiFi();
   if (WiFi.status() == WL_CONNECTED) {
     fetchAircraft();
@@ -555,11 +806,13 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+  wl_status_t wifiStatus = WiFi.status();
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (wifiStatus != WL_CONNECTED) {
     if (now - lastWifiAttempt > WIFI_RETRY_INTERVAL_MS) {
       connectWiFi();
     }
+    wifiStatus = WiFi.status();
   }
 
   if (now - lastFetchTime >= REFRESH_INTERVAL_MS) {
@@ -567,9 +820,42 @@ void loop() {
     fetchAircraft();
   }
 
-  if (now - lastRadarFrameTime >= RADAR_FRAME_INTERVAL_MS) {
-    lastRadarFrameTime = now;
-    drawRadar();
+  if (wifiStatus != WL_CONNECTED && streamPlaying) {
+    Serial.println("[STREAM] WiFi lost. Stopping stream.");
+    stopStreamingWithStatus(String("WiFi lost"));
+  }
+
+  if (streamPlaying && mp3) {
+    if (mp3->isRunning()) {
+      if (!mp3->loop()) {
+        Serial.println("[STREAM] Decoder loop returned false.");
+        stopStreamingWithStatus(String("Stream error"));
+      }
+    } else {
+      Serial.println("[STREAM] Decoder reported stopped.");
+      stopStreamingWithStatus(String("Stream ended"));
+    }
+  }
+
+  if (radarFrameReadyToPush) {
+    double rotationOffsetDeg = radarRotationSteps * 90.0;
+    {
+      ScopedRecursiveLock lock(displayMutex);
+      if (radarSpriteActive) {
+        int spriteX = radarCenterX - radarRadius;
+        int spriteY = radarCenterY - radarRadius;
+        radarSprite.pushSprite(spriteX, spriteY);
+        drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
+        tft.setTextDatum(TL_DATUM);
+        tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+        drawStatusBar();
+      }
+    }
+    radarFrameReadyToPush = false;
+  }
+
+  if (infoPanelDirty) {
+    renderInfoPanel();
   }
 
   handleTouch();
@@ -648,6 +934,7 @@ void setupRadarSprite() {
 }
 
 void drawStaticLayout() {
+  ScopedRecursiveLock lock(displayMutex);
   tft.fillScreen(COLOR_BACKGROUND);
   radarAreaY = RADAR_TOP_PADDING;
   radarAreaHeight = tft.height() / 2;
@@ -690,6 +977,7 @@ void drawStaticLayout() {
 }
 
 void renderInfoPanel() {
+  ScopedRecursiveLock lock(displayMutex);
   if (!infoPanelDirty) {
     return;
   }
@@ -802,6 +1090,8 @@ void renderInfoPanel() {
     }
     addRow("Traffic", traffic);
   }
+
+  addRow("Audio", streamStatusMessage);
 
   int headerHeight = 0;
   int availableHeight = textAreaHeight;
@@ -958,6 +1248,43 @@ bool ensureActiveContactFresh(unsigned long now) {
 }
 
 void drawRadar() {
+  if (!radarTaskStarted || radarTaskHandle == nullptr || !radarSpriteActive) {
+    renderRadarFrame(true);
+    return;
+  }
+
+  radarFrameRequested = true;
+  xTaskNotifyGive(radarTaskHandle);
+}
+
+void radarTask(void *param) {
+  const TickType_t waitTicks = pdMS_TO_TICKS(RADAR_FRAME_INTERVAL_MS);
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, waitTicks);
+
+    bool shouldDraw = false;
+    if (radarFrameRequested) {
+      radarFrameRequested = false;
+      shouldDraw = true;
+    }
+
+    unsigned long now = millis();
+    if (!shouldDraw && (now - lastRadarFrameTime) >= RADAR_FRAME_INTERVAL_MS) {
+      shouldDraw = true;
+    }
+
+    if (shouldDraw) {
+      if (radarSpriteActive) {
+        renderRadarFrame(false);
+      } else {
+        radarFrameRequested = false;
+      }
+    }
+  }
+}
+
+void renderRadarFrame(bool pushToDisplay) {
+  ScopedRecursiveLock lock(displayMutex);
   unsigned long now = millis();
   lastRadarFrameTime = now;
   compassLabelBoundsValid = false;
@@ -970,8 +1297,8 @@ void drawRadar() {
     return;
   }
 
-  if (infoPanelDirty) {
-    renderInfoPanel();
+  if (pushToDisplay) {
+    radarFrameReadyToPush = false;
   }
 
   bool highlightChanged = false;
@@ -1052,10 +1379,13 @@ void drawRadar() {
       drawAircraftIcon(radarSprite, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
     }
 
-    int spriteX = radarCenterX - radarRadius;
-    int spriteY = radarCenterY - radarRadius;
-    radarSprite.pushSprite(spriteX, spriteY);
+    if (!pushToDisplay) {
+      radarFrameReadyToPush = true;
+    }
   } else {
+    if (!pushToDisplay) {
+      return;
+    }
     int centerX = radarCenterX;
     int centerY = radarCenterY;
 
@@ -1135,14 +1465,23 @@ void drawRadar() {
 
   bool cleared = ensureActiveContactFresh(now);
   if (highlightChanged || cleared) {
-    renderInfoPanel();
+    infoPanelDirty = true;
   }
 
-  drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+  if (pushToDisplay) {
+    if (radarSpriteActive) {
+      int spriteX = radarCenterX - radarRadius;
+      int spriteY = radarCenterY - radarRadius;
+      radarSprite.pushSprite(spriteX, spriteY);
+      radarFrameReadyToPush = false;
+    }
 
-  drawStatusBar();
+    drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+
+    drawStatusBar();
+  }
 }
 
 void connectWiFi() {
@@ -1501,6 +1840,7 @@ String formatTimeAgo(unsigned long ms) {
 }
 
 void drawStatusBar() {
+  ScopedRecursiveLock lock(displayMutex);
   int iconWidth = WIFI_ICON_BARS * WIFI_ICON_BAR_WIDTH + (WIFI_ICON_BARS - 1) * WIFI_ICON_BAR_SPACING;
   int iconX = tft.width() - RADAR_MARGIN - iconWidth;
   int iconY = RADAR_MARGIN / 2;
@@ -1531,6 +1871,7 @@ void drawStatusBar() {
 }
 
 void drawWifiIcon(int x, int y, int barsActive, bool connected) {
+  ScopedRecursiveLock lock(displayMutex);
   int iconWidth = WIFI_ICON_BARS * WIFI_ICON_BAR_WIDTH + (WIFI_ICON_BARS - 1) * WIFI_ICON_BAR_SPACING;
   tft.fillRect(x, y, iconWidth, WIFI_ICON_HEIGHT, COLOR_BACKGROUND);
 
@@ -1567,6 +1908,9 @@ void configureButtons() {
     } else if (i == 1) {
       btn.name = "Alert";
       btn.type = BUTTON_ALERT_RANGE;
+    } else if (i == 2) {
+      btn.name = "Stream";
+      btn.type = BUTTON_STREAM_TOGGLE;
     } else {
       btn.name = "Button";
       btn.type = BUTTON_UNKNOWN;
@@ -1575,6 +1919,7 @@ void configureButtons() {
 }
 
 void drawButtons() {
+  ScopedRecursiveLock lock(displayMutex);
   for (int i = 0; i < BUTTON_COUNT; ++i) {
     drawButton(i);
   }
@@ -1583,6 +1928,7 @@ void drawButtons() {
 }
 
 void drawButton(int index) {
+  ScopedRecursiveLock lock(displayMutex);
   if (index < 0 || index >= BUTTON_COUNT) {
     return;
   }
@@ -1605,6 +1951,8 @@ void drawButton(int index) {
     value = String(currentRadarRangeKm(), 0) + " km";
   } else if (btn.type == BUTTON_ALERT_RANGE) {
     value = String(currentAlertRangeKm(), 0) + " km";
+  } else if (btn.type == BUTTON_STREAM_TOGGLE) {
+    value = streamPlaying ? String("On") : String("Off");
   } else {
     value = btn.state ? String("ON") : String("OFF");
   }
