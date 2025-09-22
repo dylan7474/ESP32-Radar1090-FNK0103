@@ -454,7 +454,21 @@ void startStreaming() {
   Serial.print("[STREAM] Connected to stream: ");
   Serial.println(STREAM_URL);
 
-  audioOutput = new AudioOutputI2S();
+  bool useExternalI2S = I2S_BCLK_PIN >= 0 && I2S_LRCLK_PIN >= 0 && I2S_DOUT_PIN >= 0;
+  if (useExternalI2S) {
+    Serial.print("[STREAM] Configuring external I2S pins BCLK=");
+    Serial.print(I2S_BCLK_PIN);
+    Serial.print(", LRCLK=");
+    Serial.print(I2S_LRCLK_PIN);
+    Serial.print(", DOUT=");
+    Serial.println(I2S_DOUT_PIN);
+    audioOutput = new AudioOutputI2S();
+  } else {
+    Serial.print("[STREAM] Using internal DAC on GPIO");
+    Serial.println(I2S_DOUT_PIN);
+    audioOutput = new AudioOutputI2S(0, 1);
+  }
+
   if (!audioOutput) {
     Serial.println("[STREAM] Failed to allocate audio output.");
     cleanupStream();
@@ -463,7 +477,15 @@ void startStreaming() {
     return;
   }
 
-  bool pinoutOk = audioOutput->SetPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
+  bool pinoutOk = false;
+  if (useExternalI2S) {
+    pinoutOk = audioOutput->SetPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
+  } else if (I2S_DOUT_PIN >= 0) {
+    pinoutOk = audioOutput->SetPinout(-1, -1, I2S_DOUT_PIN);
+  } else {
+    Serial.println("[STREAM] Invalid DAC pin configuration. Set I2S_DOUT_PIN.");
+  }
+
   if (!pinoutOk) {
     Serial.println("[STREAM] Audio pin configuration failed.");
     cleanupStream();
