@@ -689,67 +689,17 @@ void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, flo
     return;
   }
 
-  double normalizedHeading = fmod(headingDeg, 360.0);
-  if (normalizedHeading < 0.0) {
-    normalizedHeading += 360.0;
-  }
-  double headingRad = deg2rad(normalizedHeading);
-  double sinHeading = sin(headingRad);
-  double cosHeading = cos(headingRad);
-
-  struct BasePoint {
-    float x;
-    float y;
-  };
-
-  float length = size * 1.6f;
-  float wingSpan = size * 1.2f;
-  float tailSpan = size * 0.6f;
-  float tailLength = size * 0.8f;
-
-  const BasePoint basePoints[] = {
-      {0.0f, -length},           // Nose
-      {-wingSpan, 0.0f},         // Left wing tip
-      {-tailSpan, tailLength},   // Left tail
-      {0.0f, length},            // Tail center
-      {tailSpan, tailLength},    // Right tail
-      {wingSpan, 0.0f},          // Right wing tip
-  };
-
-  struct PixelPoint {
-    int16_t x;
-    int16_t y;
-  };
-
-  constexpr size_t pointCount = sizeof(basePoints) / sizeof(basePoints[0]);
-  PixelPoint transformed[pointCount];
-
-  for (size_t i = 0; i < pointCount; ++i) {
-    float localX = basePoints[i].x;
-    float localY = basePoints[i].y;
-    float rotatedX = localX * cosHeading - localY * sinHeading;
-    float rotatedY = localX * sinHeading + localY * cosHeading;
-    transformed[i].x = centerX + (int)round(rotatedX);
-    transformed[i].y = centerY + (int)round(rotatedY);
-    if ((i & 1U) == 1U) {
-      serviceAudioDuringRadarDraw();
-    }
+  int radius = static_cast<int>(roundf(size * 0.35f));
+  if (radius < 1) {
+    radius = 1;
   }
 
-  constexpr uint8_t segments[][2] = {
-      {0, 1}, {0, 5}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {1, 5}, {0, 3}, {2, 4}};
-
-  constexpr size_t segmentCount = sizeof(segments) / sizeof(segments[0]);
-  for (size_t i = 0; i < segmentCount; ++i) {
-    const PixelPoint &from = transformed[segments[i][0]];
-    const PixelPoint &to = transformed[segments[i][1]];
-    gfx.drawLine(from.x, from.y, to.x, to.y, color);
-    if ((i & 1U) == 1U) {
-      serviceAudioDuringRadarDraw();
-    }
+  if (radius == 1) {
+    gfx.drawPixel(centerX, centerY, color);
+  } else {
+    gfx.fillCircle(centerX, centerY, radius, color);
   }
 
-  gfx.drawPixel(centerX, centerY, color);
   serviceAudioDuringRadarDraw();
 }
 
