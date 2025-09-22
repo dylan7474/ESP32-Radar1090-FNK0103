@@ -7,6 +7,9 @@
 #include <math.h>
 #include <cstring>
 #include <EEPROM.h>
+#include <AudioFileSourceICYStream.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioOutputI2S.h>
 
 #include "config.h"
 #include "plane_icon.h"
@@ -44,7 +47,7 @@ static const int COMPASS_LABEL_OFFSET = 16;
 static const int COMPASS_TEXT_SIZE = 2;
 static const float AIRCRAFT_ICON_SIZE = 6.0f;
 
-static const int BUTTON_COUNT = 2;
+static const int BUTTON_COUNT = 3;
 static const int BUTTON_HEIGHT = 48;
 static const int BUTTON_SPACING = 12;
 static const unsigned long TOUCH_DEBOUNCE_MS = 250;
@@ -168,6 +171,7 @@ static const int AIRSPACE_ZONE_COUNT = sizeof(AIRSPACE_ZONES) / sizeof(AIRSPACE_
 enum ButtonType {
   BUTTON_RADAR_RANGE,
   BUTTON_ALERT_RANGE,
+  BUTTON_STREAM_TOGGLE,
   BUTTON_UNKNOWN
 };
 
@@ -186,6 +190,15 @@ unsigned long lastTouchTime = 0;
 
 int activeContactIndex = -1;
 bool infoPanelDirty = true;
+bool streamPlaying = false;
+String streamStatusMessage = "Stream stopped";
+
+AudioGeneratorMP3 *mp3 = nullptr;
+AudioFileSourceICYStream *streamFile = nullptr;
+AudioOutputI2S *audioOutput = nullptr;
+
+bool amplifierEnabled = false;
+bool amplifierStateInitialised = false;
 
 struct InfoTableRow {
   String label;
@@ -233,6 +246,12 @@ void renderInfoPanel();
 bool setActiveContact(int index);
 bool clearActiveContact();
 bool ensureActiveContactFresh(unsigned long now);
+void startStreaming();
+void stopStreaming();
+void stopStreamingWithStatus(const String &message);
+void cleanupStream();
+void setAmplifierState(bool enable);
+void setStreamStatus(const String &status);
 
 void initializeRangeIndices() {
   bool loadedFromEeprom = false;
@@ -320,6 +339,13 @@ void handleRangeButton(ButtonType type) {
     cycleRadarRange();
   } else if (type == BUTTON_ALERT_RANGE) {
     cycleAlertRange();
+  } else if (type == BUTTON_STREAM_TOGGLE) {
+    if (streamPlaying) {
+      stopStreaming();
+    } else {
+      startStreaming();
+    }
+    return;
   } else {
     return;
   }
@@ -333,6 +359,144 @@ void handleRangeButton(ButtonType type) {
   updateDisplay();
   fetchAircraft();
   lastFetchTime = millis();
+}
+
+void setStreamStatus(const String &status) {
+  streamStatusMessage = status;
+  infoPanelDirty = true;
+}
+
+void setAmplifierState(bool enable) {
+  if (AUDIO_AMP_ENABLE_PIN < 0) {
+    return;
+  }
+  if (!amplifierStateInitialised || amplifierEnabled != enable) {
+    digitalWrite(AUDIO_AMP_ENABLE_PIN, enable ? LOW : HIGH);
+    if (!enable) {
+      delay(5);
+    }
+    amplifierEnabled = enable;
+    amplifierStateInitialised = true;
+  }
+}
+
+void cleanupStream() {
+  if (mp3) {
+    if (mp3->isRunning()) {
+      mp3->stop();
+    }
+    delete mp3;
+    mp3 = nullptr;
+  }
+
+  if (streamFile) {
+    streamFile->close();
+    delete streamFile;
+    streamFile = nullptr;
+  }
+
+  if (audioOutput) {
+    delete audioOutput;
+    audioOutput = nullptr;
+  }
+
+  setAmplifierState(false);
+}
+
+void stopStreamingWithStatus(const String &message) {
+  cleanupStream();
+  if (streamPlaying) {
+    Serial.println("[STREAM] Stream stopped.");
+  }
+  streamPlaying = false;
+  setStreamStatus(message);
+  drawButtons();
+}
+
+void stopStreaming() {
+  stopStreamingWithStatus(String("Stream stopped"));
+}
+
+void startStreaming() {
+  Serial.println("[STREAM] Start requested.");
+  if (streamPlaying) {
+    Serial.println("[STREAM] Stream already running.");
+    drawButtons();
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[STREAM] Cannot start stream - WiFi not connected.");
+    setStreamStatus("WiFi required");
+    drawButtons();
+    return;
+  }
+
+  setStreamStatus("Connecting...");
+  cleanupStream();
+
+  streamFile = new AudioFileSourceICYStream();
+  if (!streamFile) {
+    Serial.println("[STREAM] Failed to allocate stream source.");
+    setStreamStatus("No memory");
+    drawButtons();
+    return;
+  }
+
+  if (!streamFile->open(STREAM_URL)) {
+    Serial.println("[STREAM] Failed to open stream URL.");
+    cleanupStream();
+    setStreamStatus("Stream failed");
+    drawButtons();
+    return;
+  }
+
+  Serial.print("[STREAM] Connected to stream: ");
+  Serial.println(STREAM_URL);
+
+  audioOutput = new AudioOutputI2S();
+  if (!audioOutput) {
+    Serial.println("[STREAM] Failed to allocate audio output.");
+    cleanupStream();
+    setStreamStatus("Audio init failed");
+    drawButtons();
+    return;
+  }
+
+  bool pinoutOk = audioOutput->SetPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
+  if (!pinoutOk) {
+    Serial.println("[STREAM] Audio pin configuration failed.");
+    cleanupStream();
+    setStreamStatus("Audio pin error");
+    drawButtons();
+    return;
+  }
+
+  audioOutput->SetOutputModeMono(true);
+  audioOutput->SetGain(1.0f);
+  setAmplifierState(true);
+
+  mp3 = new AudioGeneratorMP3();
+  if (!mp3) {
+    Serial.println("[STREAM] Failed to allocate MP3 decoder.");
+    cleanupStream();
+    setStreamStatus("Decoder error");
+    drawButtons();
+    return;
+  }
+
+  if (!mp3->begin(streamFile, audioOutput)) {
+    Serial.println("[STREAM] MP3 decoder failed to start.");
+    cleanupStream();
+    setStreamStatus("Decoder error");
+    drawButtons();
+    return;
+  }
+
+  streamPlaying = true;
+  setStreamStatus("Streaming");
+  Serial.println("[STREAM] Streaming started.");
+  drawButtons();
 }
 
 // --- Function Prototypes ---
@@ -533,6 +697,15 @@ void setup() {
   tft.begin();
   displayRotation = 0;
   tft.setRotation(displayRotation);
+
+  if (AUDIO_AMP_ENABLE_PIN >= 0) {
+    pinMode(AUDIO_AMP_ENABLE_PIN, OUTPUT);
+    digitalWrite(AUDIO_AMP_ENABLE_PIN, HIGH);
+    setAmplifierState(false);
+    Serial.print("[STREAM] Amplifier control initialised on GPIO");
+    Serial.println(AUDIO_AMP_ENABLE_PIN);
+  }
+
   eepromInitialized = EEPROM.begin(EEPROM_SIZE);
   if (!eepromInitialized) {
     Serial.println("EEPROM init failed");
@@ -555,16 +728,35 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+  wl_status_t wifiStatus = WiFi.status();
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (wifiStatus != WL_CONNECTED) {
     if (now - lastWifiAttempt > WIFI_RETRY_INTERVAL_MS) {
       connectWiFi();
     }
+    wifiStatus = WiFi.status();
   }
 
   if (now - lastFetchTime >= REFRESH_INTERVAL_MS) {
     lastFetchTime = now;
     fetchAircraft();
+  }
+
+  if (wifiStatus != WL_CONNECTED && streamPlaying) {
+    Serial.println("[STREAM] WiFi lost. Stopping stream.");
+    stopStreamingWithStatus(String("WiFi lost"));
+  }
+
+  if (streamPlaying && mp3) {
+    if (mp3->isRunning()) {
+      if (!mp3->loop()) {
+        Serial.println("[STREAM] Decoder loop returned false.");
+        stopStreamingWithStatus(String("Stream error"));
+      }
+    } else {
+      Serial.println("[STREAM] Decoder reported stopped.");
+      stopStreamingWithStatus(String("Stream ended"));
+    }
   }
 
   if (now - lastRadarFrameTime >= RADAR_FRAME_INTERVAL_MS) {
@@ -802,6 +994,8 @@ void renderInfoPanel() {
     }
     addRow("Traffic", traffic);
   }
+
+  addRow("Audio", streamStatusMessage);
 
   int headerHeight = 0;
   int availableHeight = textAreaHeight;
@@ -1567,6 +1761,9 @@ void configureButtons() {
     } else if (i == 1) {
       btn.name = "Alert";
       btn.type = BUTTON_ALERT_RANGE;
+    } else if (i == 2) {
+      btn.name = "Stream";
+      btn.type = BUTTON_STREAM_TOGGLE;
     } else {
       btn.name = "Button";
       btn.type = BUTTON_UNKNOWN;
@@ -1605,6 +1802,8 @@ void drawButton(int index) {
     value = String(currentRadarRangeKm(), 0) + " km";
   } else if (btn.type == BUTTON_ALERT_RANGE) {
     value = String(currentAlertRangeKm(), 0) + " km";
+  } else if (btn.type == BUTTON_STREAM_TOGGLE) {
+    value = streamPlaying ? String("On") : String("Off");
   } else {
     value = btn.state ? String("ON") : String("OFF");
   }

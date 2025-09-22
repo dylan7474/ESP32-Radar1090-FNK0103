@@ -18,4 +18,8 @@
 #define I2S_LRCLK_PIN 16
 #define I2S_DOUT_PIN  27
 
+// Icecast audio stream configuration
+#define STREAM_URL "http://radio.dylanjones.org:8000/Audacity"
+#define AUDIO_AMP_ENABLE_PIN 4
+
 #endif // CONFIG_H
