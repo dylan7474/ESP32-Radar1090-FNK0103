@@ -1438,6 +1438,7 @@ void radarTask(void *param) {
 
 void audioTask(void *param) {
   const TickType_t idleDelay = pdMS_TO_TICKS(10);
+  const TickType_t workDelay = pdMS_TO_TICKS(1);
   for (;;) {
     if (!streamPlaying || mp3 == nullptr) {
       ulTaskNotifyTake(pdTRUE, idleDelay);
@@ -1450,7 +1451,7 @@ void audioTask(void *param) {
     }
 
     serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US, false);
-    taskYIELD();
+    vTaskDelay(workDelay);
   }
 }
 
