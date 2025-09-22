@@ -129,7 +129,6 @@ unsigned long lastWifiAttempt = 0;
 unsigned long lastSuccessfulFetch = 0;
 unsigned long radarSweepStart = 0;
 volatile unsigned long lastRadarFrameTime = 0;
-volatile bool radarFrameReadyToPush = false;
 
 int radarRangeIndex = 0;
 int alertRangeIndex = 0;
@@ -206,6 +205,7 @@ AudioOutputI2S *audioOutput = nullptr;
 
 bool amplifierEnabled = false;
 TaskHandle_t radarTaskHandle = nullptr;
+TaskHandle_t audioTaskHandle = nullptr;
 volatile bool radarFrameRequested = false;
 bool radarTaskStarted = false;
 SemaphoreHandle_t displayMutex = nullptr;
@@ -266,6 +266,12 @@ struct CompassLabelBounds {
 
 CompassLabelBounds compassLabelBounds[COMPASS_LABEL_COUNT];
 bool compassLabelBoundsValid = false;
+
+void wakeAudioTask() {
+  if (audioTaskHandle != nullptr) {
+    xTaskNotifyGive(audioTaskHandle);
+  }
+}
 
 void drawButtons();
 void resetRadarContacts();
@@ -454,6 +460,7 @@ void stopStreamingWithStatus(const String &message) {
   streamPlaying = false;
   setStreamStatus(message);
   drawButtons();
+  wakeAudioTask();
 }
 
 void stopStreaming() {
@@ -561,6 +568,7 @@ void startStreaming() {
   streamPlaying = true;
   setStreamStatus("Streaming");
   Serial.println("[STREAM] Streaming started.");
+  wakeAudioTask();
   drawButtons();
 }
 
@@ -647,6 +655,7 @@ bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 void rotateRadarOrientation();
 void radarTask(void *param);
+void audioTask(void *param);
 void serviceAudioDecoder(uint32_t timeBudgetUs = AUDIO_SERVICE_TIME_SLICE_US, bool nonBlocking = false);
 void serviceAudioDuringRadarDraw();
 
@@ -903,6 +912,21 @@ void setup() {
     Serial.println("[RADAR] Failed to start radar render task; falling back to loop updates.");
   }
 
+  BaseType_t audioTaskStatus = xTaskCreatePinnedToCore(
+      audioTask,
+      "AudioTask",
+      4096,
+      nullptr,
+      2,
+      &audioTaskHandle,
+      1);
+  if (audioTaskStatus == pdPASS) {
+    Serial.println("[STREAM] Audio service task started on core 1.");
+  } else {
+    audioTaskHandle = nullptr;
+    Serial.println("[STREAM] Failed to start audio service task; decoding will run on loop.");
+  }
+
   connectWiFi();
   if (WiFi.status() == WL_CONNECTED) {
     fetchAircraft();
@@ -934,7 +958,11 @@ void loop() {
   if (streamPlaying && mp3) {
     bool decoderRunningBefore = mp3->isRunning();
     if (decoderRunningBefore) {
-      serviceAudioDecoder();
+      if (audioTaskHandle != nullptr) {
+        serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US / 2, true);
+      } else {
+        serviceAudioDecoder();
+      }
     }
 
     if (streamPlaying && mp3 && !mp3->isRunning()) {
@@ -945,26 +973,12 @@ void loop() {
     }
   }
 
-  if (radarFrameReadyToPush) {
-    serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 2);
-    double rotationOffsetDeg = radarRotationSteps * 90.0;
-    {
-      ScopedRecursiveLock lock(displayMutex);
-      if (radarSpriteActive) {
-        int spriteX = radarCenterX - radarRadius;
-        int spriteY = radarCenterY - radarRadius;
-        radarSprite.pushSprite(spriteX, spriteY);
-        drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
-        tft.setTextDatum(TL_DATUM);
-        tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
-        drawStatusBar();
-      }
-    }
-    radarFrameReadyToPush = false;
-  }
-
   if (infoPanelDirty) {
-    serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3);
+    if (audioTaskHandle != nullptr) {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3, true);
+    } else {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3);
+    }
     renderInfoPanel();
   }
 
@@ -1384,12 +1398,26 @@ void radarTask(void *param) {
     }
 
     if (shouldDraw) {
-      if (radarSpriteActive) {
-        renderRadarFrame(false);
-      } else {
-        radarFrameRequested = false;
-      }
+      renderRadarFrame(true);
     }
+  }
+}
+
+void audioTask(void *param) {
+  const TickType_t idleDelay = pdMS_TO_TICKS(10);
+  for (;;) {
+    if (!streamPlaying || mp3 == nullptr) {
+      ulTaskNotifyTake(pdTRUE, idleDelay);
+      continue;
+    }
+
+    if (!mp3->isRunning()) {
+      ulTaskNotifyTake(pdTRUE, idleDelay);
+      continue;
+    }
+
+    serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US, false);
+    taskYIELD();
   }
 }
 
@@ -1405,10 +1433,6 @@ void renderRadarFrame(bool pushToDisplay) {
   double radarRangeKm = currentRadarRangeKm();
   if (radarRangeKm <= 0.0) {
     return;
-  }
-
-  if (pushToDisplay) {
-    radarFrameReadyToPush = false;
   }
 
   bool highlightChanged = false;
@@ -1498,13 +1522,7 @@ void renderRadarFrame(bool pushToDisplay) {
       drawAircraftIcon(radarSprite, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
     }
 
-    if (!pushToDisplay) {
-      radarFrameReadyToPush = true;
-    }
   } else {
-    if (!pushToDisplay) {
-      return;
-    }
     int centerX = radarCenterX;
     int centerY = radarCenterY;
 
@@ -1602,7 +1620,6 @@ void renderRadarFrame(bool pushToDisplay) {
       int spriteY = radarCenterY - radarRadius;
       serviceAudioDuringRadarDraw();
       radarSprite.pushSprite(spriteX, spriteY);
-      radarFrameReadyToPush = false;
     }
 
     serviceAudioDuringRadarDraw();
