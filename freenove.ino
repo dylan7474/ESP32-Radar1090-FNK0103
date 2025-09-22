@@ -39,6 +39,7 @@ static const int MAX_RADAR_CONTACTS = 40;
 static const unsigned long RADAR_SWEEP_PERIOD_MS = 4000;
 static const unsigned long RADAR_FADE_DURATION_MS = 4000;
 static const unsigned long RADAR_FRAME_INTERVAL_MS = 40;
+static const uint32_t AUDIO_SERVICE_TIME_SLICE_US = 6000;
 static const double RADAR_SWEEP_WIDTH_DEG = 3.0;
 static const uint16_t COLOR_RADAR_SWEEP = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_ACTIVE = TFT_DARKGREEN;
@@ -529,6 +530,32 @@ void startStreaming() {
   drawButtons();
 }
 
+void serviceAudioDecoder() {
+  if (!streamPlaying || !mp3) {
+    return;
+  }
+
+  if (!mp3->isRunning()) {
+    return;
+  }
+
+  uint32_t startMicros = micros();
+  while (streamPlaying && mp3 && mp3->isRunning()) {
+    if (!mp3->loop()) {
+      Serial.println("[STREAM] Decoder loop returned false.");
+      stopStreamingWithStatus(String("Stream error"));
+      return;
+    }
+
+    uint32_t elapsed = micros() - startMicros;
+    if (elapsed >= AUDIO_SERVICE_TIME_SLICE_US) {
+      break;
+    }
+
+    taskYIELD();
+  }
+}
+
 // --- Function Prototypes ---
 void drawStaticLayout();
 void updateDisplay();
@@ -554,6 +581,7 @@ bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 void rotateRadarOrientation();
 void radarTask(void *param);
+void serviceAudioDecoder();
 
 class ScopedRecursiveLock {
  public:
@@ -826,13 +854,15 @@ void loop() {
   }
 
   if (streamPlaying && mp3) {
-    if (mp3->isRunning()) {
-      if (!mp3->loop()) {
-        Serial.println("[STREAM] Decoder loop returned false.");
-        stopStreamingWithStatus(String("Stream error"));
+    bool decoderRunningBefore = mp3->isRunning();
+    if (decoderRunningBefore) {
+      serviceAudioDecoder();
+    }
+
+    if (streamPlaying && mp3 && !mp3->isRunning()) {
+      if (decoderRunningBefore) {
+        Serial.println("[STREAM] Decoder reported stopped.");
       }
-    } else {
-      Serial.println("[STREAM] Decoder reported stopped.");
       stopStreamingWithStatus(String("Stream ended"));
     }
   }
@@ -860,7 +890,7 @@ void loop() {
 
   handleTouch();
 
-  delay(10);
+  delay(1);
 }
 
 struct RadarContact {
@@ -1540,7 +1570,9 @@ void fetchAircraft() {
   }
 
   http.setTimeout(4000);
+  serviceAudioDecoder();
   int httpCode = http.GET();
+  serviceAudioDecoder();
 
   if (httpCode == HTTP_CODE_OK) {
     DynamicJsonDocument doc(16384);
@@ -1571,6 +1603,7 @@ void fetchAircraft() {
       int localInboundCount = 0;
 
       for (JsonObject plane : arr) {
+        serviceAudioDecoder();
         if (!plane.containsKey("lat") || !plane.containsKey("lon")) {
           continue;
         }
@@ -1659,6 +1692,8 @@ void fetchAircraft() {
             squawk = String(buffer);
           }
         }
+
+        serviceAudioDecoder();
 
         int altitude = -1;
         if (plane.containsKey("alt_baro")) {
