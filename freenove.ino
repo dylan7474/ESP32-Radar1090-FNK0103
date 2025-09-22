@@ -126,6 +126,7 @@ unsigned long lastWifiAttempt = 0;
 unsigned long lastSuccessfulFetch = 0;
 unsigned long radarSweepStart = 0;
 volatile unsigned long lastRadarFrameTime = 0;
+volatile bool radarFrameReadyToPush = false;
 
 int radarRangeIndex = 0;
 int alertRangeIndex = 0;
@@ -533,7 +534,7 @@ void drawStaticLayout();
 void updateDisplay();
 void drawInfoLine(int index, const String &text);
 void drawRadar();
-void renderRadarFrame();
+void renderRadarFrame(bool pushToDisplay);
 void resetRadarContacts();
 void setupRadarSprite();
 void connectWiFi();
@@ -834,6 +835,27 @@ void loop() {
       Serial.println("[STREAM] Decoder reported stopped.");
       stopStreamingWithStatus(String("Stream ended"));
     }
+  }
+
+  if (radarFrameReadyToPush) {
+    double rotationOffsetDeg = radarRotationSteps * 90.0;
+    {
+      ScopedRecursiveLock lock(displayMutex);
+      if (radarSpriteActive) {
+        int spriteX = radarCenterX - radarRadius;
+        int spriteY = radarCenterY - radarRadius;
+        radarSprite.pushSprite(spriteX, spriteY);
+        drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
+        tft.setTextDatum(TL_DATUM);
+        tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+        drawStatusBar();
+      }
+    }
+    radarFrameReadyToPush = false;
+  }
+
+  if (infoPanelDirty) {
+    renderInfoPanel();
   }
 
   handleTouch();
@@ -1226,8 +1248,8 @@ bool ensureActiveContactFresh(unsigned long now) {
 }
 
 void drawRadar() {
-  if (!radarTaskStarted || radarTaskHandle == nullptr) {
-    renderRadarFrame();
+  if (!radarTaskStarted || radarTaskHandle == nullptr || !radarSpriteActive) {
+    renderRadarFrame(true);
     return;
   }
 
@@ -1252,12 +1274,16 @@ void radarTask(void *param) {
     }
 
     if (shouldDraw) {
-      renderRadarFrame();
+      if (radarSpriteActive) {
+        renderRadarFrame(false);
+      } else {
+        radarFrameRequested = false;
+      }
     }
   }
 }
 
-void renderRadarFrame() {
+void renderRadarFrame(bool pushToDisplay) {
   ScopedRecursiveLock lock(displayMutex);
   unsigned long now = millis();
   lastRadarFrameTime = now;
@@ -1271,8 +1297,8 @@ void renderRadarFrame() {
     return;
   }
 
-  if (infoPanelDirty) {
-    renderInfoPanel();
+  if (pushToDisplay) {
+    radarFrameReadyToPush = false;
   }
 
   bool highlightChanged = false;
@@ -1353,10 +1379,13 @@ void renderRadarFrame() {
       drawAircraftIcon(radarSprite, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
     }
 
-    int spriteX = radarCenterX - radarRadius;
-    int spriteY = radarCenterY - radarRadius;
-    radarSprite.pushSprite(spriteX, spriteY);
+    if (!pushToDisplay) {
+      radarFrameReadyToPush = true;
+    }
   } else {
+    if (!pushToDisplay) {
+      return;
+    }
     int centerX = radarCenterX;
     int centerY = radarCenterY;
 
@@ -1436,14 +1465,23 @@ void renderRadarFrame() {
 
   bool cleared = ensureActiveContactFresh(now);
   if (highlightChanged || cleared) {
-    renderInfoPanel();
+    infoPanelDirty = true;
   }
 
-  drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+  if (pushToDisplay) {
+    if (radarSpriteActive) {
+      int spriteX = radarCenterX - radarRadius;
+      int spriteY = radarCenterY - radarRadius;
+      radarSprite.pushSprite(spriteX, spriteY);
+      radarFrameReadyToPush = false;
+    }
 
-  drawStatusBar();
+    drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+
+    drawStatusBar();
+  }
 }
 
 void connectWiFi() {
