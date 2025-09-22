@@ -1422,17 +1422,24 @@ void renderRadarFrame(bool pushToDisplay) {
 
   if (radarSpriteActive) {
     radarSprite.fillSprite(COLOR_BACKGROUND);
+    serviceAudioDuringRadarDraw();
     int spriteCenter = radarSpriteWidth / 2;
 
     radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_OUTLINE);
+    serviceAudioDuringRadarDraw();
     radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius / 2, COLOR_RADAR_OUTLINE);
+    serviceAudioDuringRadarDraw();
     drawRadarCross(radarSprite, spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_GRID, rotationOffsetDeg);
+    serviceAudioDuringRadarDraw();
     drawAirspaceZones(radarSprite, spriteCenter, spriteCenter, radarRadius, rotationOffsetDeg, radarRangeKm);
+    serviceAudioDuringRadarDraw();
     radarSprite.fillCircle(spriteCenter, spriteCenter, 3, COLOR_RADAR_HOME);
+    serviceAudioDuringRadarDraw();
 
     int sweepX = spriteCenter + (int)round(sin(sweepRad) * (radarRadius - 1));
     int sweepY = spriteCenter - (int)round(cos(sweepRad) * (radarRadius - 1));
     radarSprite.drawLine(spriteCenter, spriteCenter, sweepX, sweepY, COLOR_RADAR_SWEEP);
+    serviceAudioDuringRadarDraw();
 
     for (int i = 0; i < radarContactCount; ++i) {
       if (!radarContacts[i].valid) {
@@ -1459,6 +1466,8 @@ void renderRadarFrame(bool pushToDisplay) {
         radarContacts[i].valid = false;
         continue;
       }
+
+      serviceAudioDuringRadarDraw();
 
       double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
       if (normalized > 1.0) {
@@ -1506,15 +1515,22 @@ void renderRadarFrame(bool pushToDisplay) {
     }
 
     tft.fillCircle(centerX, centerY, radarRadius, COLOR_BACKGROUND);
+    serviceAudioDuringRadarDraw();
     tft.drawCircle(centerX, centerY, radarRadius, COLOR_RADAR_OUTLINE);
+    serviceAudioDuringRadarDraw();
     tft.drawCircle(centerX, centerY, radarRadius / 2, COLOR_RADAR_OUTLINE);
+    serviceAudioDuringRadarDraw();
     drawRadarCross(tft, centerX, centerY, radarRadius, COLOR_RADAR_GRID, rotationOffsetDeg);
+    serviceAudioDuringRadarDraw();
     drawAirspaceZones(tft, centerX, centerY, radarRadius, rotationOffsetDeg, radarRangeKm);
+    serviceAudioDuringRadarDraw();
     tft.fillCircle(centerX, centerY, 3, COLOR_RADAR_HOME);
+    serviceAudioDuringRadarDraw();
 
     int sweepX = centerX + (int)round(sin(sweepRad) * (radarRadius - 1));
     int sweepY = centerY - (int)round(cos(sweepRad) * (radarRadius - 1));
     tft.drawLine(centerX, centerY, sweepX, sweepY, COLOR_RADAR_SWEEP);
+    serviceAudioDuringRadarDraw();
 
     for (int i = 0; i < radarContactCount; ++i) {
       if (!radarContacts[i].valid) {
@@ -1541,6 +1557,8 @@ void renderRadarFrame(bool pushToDisplay) {
         radarContacts[i].valid = false;
         continue;
       }
+
+      serviceAudioDuringRadarDraw();
 
       double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
       if (normalized > 1.0) {
@@ -1582,11 +1600,14 @@ void renderRadarFrame(bool pushToDisplay) {
     if (radarSpriteActive) {
       int spriteX = radarCenterX - radarRadius;
       int spriteY = radarCenterY - radarRadius;
+      serviceAudioDuringRadarDraw();
       radarSprite.pushSprite(spriteX, spriteY);
       radarFrameReadyToPush = false;
     }
 
+    serviceAudioDuringRadarDraw();
     drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
+    serviceAudioDuringRadarDraw();
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
 
