@@ -707,7 +707,7 @@ void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, flo
   float tailSpan = size * 0.6f;
   float tailLength = size * 0.8f;
 
-  constexpr BasePoint basePoints[] = {
+  const BasePoint basePoints[] = {
       {0.0f, -length},           // Nose
       {-wingSpan, 0.0f},         // Left wing tip
       {-tailSpan, tailLength},   // Left tail
