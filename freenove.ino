@@ -725,45 +725,41 @@ void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, flo
   double sinHeading = sin(headingRad);
   double cosHeading = cos(headingRad);
 
-  float scale = (2.0f * size) / max(PLANE_ICON_HEIGHT - 1, 1);
-  if (scale <= 0.0f || isnan(scale)) {
-    return;
-  }
+  float fuselageLength = size * 2.4f;
+  float halfFuselage = fuselageLength * 0.5f;
+  float wingSpan = size * 1.6f;
+  float tailSpan = size * 1.0f;
+  float wingOffset = size * 0.1f;
+  float tailOffset = size * 0.9f;
 
-  float halfWidth = (PLANE_ICON_WIDTH - 1) * 0.5f;
-  float halfHeight = (PLANE_ICON_HEIGHT - 1) * 0.5f;
-
-  for (int y = 0; y < PLANE_ICON_HEIGHT; ++y) {
+  auto drawSegment = [&](float x0, float y0, float x1, float y1) {
+    double rx0 = x0 * cosHeading - y0 * sinHeading;
+    double ry0 = x0 * sinHeading + y0 * cosHeading;
+    double rx1 = x1 * cosHeading - y1 * sinHeading;
+    double ry1 = x1 * sinHeading + y1 * cosHeading;
+    int drawX0 = centerX + (int)round(rx0);
+    int drawY0 = centerY + (int)round(ry0);
+    int drawX1 = centerX + (int)round(rx1);
+    int drawY1 = centerY + (int)round(ry1);
+    gfx.drawLine(drawX0, drawY0, drawX1, drawY1, color);
     serviceAudioDuringRadarDraw();
-    for (int x = 0; x < PLANE_ICON_WIDTH; ++x) {
-      if ((x & 0x07) == 0) {
-        serviceAudioDuringRadarDraw();
-      }
-      int index = y * PLANE_ICON_WIDTH + x;
-      uint8_t alpha = pgm_read_byte(&PLANE_ICON_ALPHA[index]);
-      if (alpha < 16) {
-        continue;
-      }
+  };
 
-      uint8_t intensity = pgm_read_byte(&PLANE_ICON_INTENSITY[index]);
-      uint8_t effectiveIntensity = (uint8_t)((intensity * alpha + 127) / 255);
-      if (effectiveIntensity == 0) {
-        continue;
-      }
+  auto drawPoint = [&](float x, float y) {
+    double rx = x * cosHeading - y * sinHeading;
+    double ry = x * sinHeading + y * cosHeading;
+    int drawX = centerX + (int)round(rx);
+    int drawY = centerY + (int)round(ry);
+    gfx.drawPixel(drawX, drawY, color);
+    serviceAudioDuringRadarDraw();
+  };
 
-      float localX = (x - halfWidth) * scale;
-      float localY = (y - halfHeight) * scale;
-      double rotatedX = localX * cosHeading - localY * sinHeading;
-      double rotatedY = localX * sinHeading + localY * cosHeading;
-      int drawX = centerX + (int)round(rotatedX);
-      int drawY = centerY + (int)round(rotatedY);
-
-      uint16_t tintedColor = applyAircraftIconIntensity(color, effectiveIntensity);
-      gfx.drawPixel(drawX, drawY, tintedColor);
-    }
-  }
-
-  serviceAudioDuringRadarDraw();
+  drawSegment(0.0f, -halfFuselage, 0.0f, halfFuselage);
+  drawSegment(-wingSpan, wingOffset, wingSpan, wingOffset);
+  drawSegment(-tailSpan, tailOffset, tailSpan, tailOffset);
+  drawSegment(0.0f, -halfFuselage, -tailSpan * 0.3f, -halfFuselage * 0.4f);
+  drawSegment(0.0f, -halfFuselage, tailSpan * 0.3f, -halfFuselage * 0.4f);
+  drawPoint(0.0f, -halfFuselage);
 }
 
 template <typename GFX>
