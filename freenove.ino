@@ -10,6 +10,9 @@
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioOutputI2S.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include "config.h"
 #include "plane_icon.h"
@@ -122,7 +125,7 @@ unsigned long lastFetchTime = 0;
 unsigned long lastWifiAttempt = 0;
 unsigned long lastSuccessfulFetch = 0;
 unsigned long radarSweepStart = 0;
-unsigned long lastRadarFrameTime = 0;
+volatile unsigned long lastRadarFrameTime = 0;
 
 int radarRangeIndex = 0;
 int alertRangeIndex = 0;
@@ -198,6 +201,10 @@ AudioFileSourceICYStream *streamFile = nullptr;
 AudioOutputI2S *audioOutput = nullptr;
 
 bool amplifierEnabled = false;
+TaskHandle_t radarTaskHandle = nullptr;
+volatile bool radarFrameRequested = false;
+bool radarTaskStarted = false;
+SemaphoreHandle_t displayMutex = nullptr;
 bool amplifierStateInitialised = false;
 
 struct InfoTableRow {
@@ -526,6 +533,7 @@ void drawStaticLayout();
 void updateDisplay();
 void drawInfoLine(int index, const String &text);
 void drawRadar();
+void renderRadarFrame();
 void resetRadarContacts();
 void setupRadarSprite();
 void connectWiFi();
@@ -544,6 +552,31 @@ void drawButton(int index);
 bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 void rotateRadarOrientation();
+void radarTask(void *param);
+
+class ScopedRecursiveLock {
+ public:
+  explicit ScopedRecursiveLock(SemaphoreHandle_t semaphore)
+      : semaphore_(semaphore), locked_(false) {
+    if (semaphore_ != nullptr) {
+      if (xSemaphoreTakeRecursive(semaphore_, portMAX_DELAY) == pdTRUE) {
+        locked_ = true;
+      }
+    }
+  }
+
+  ~ScopedRecursiveLock() {
+    if (locked_ && semaphore_ != nullptr) {
+      xSemaphoreGiveRecursive(semaphore_);
+    }
+  }
+
+  bool isLocked() const { return locked_; }
+
+ private:
+  SemaphoreHandle_t semaphore_;
+  bool locked_;
+};
 
 uint16_t applyAircraftIconIntensity(uint16_t baseColor, uint8_t intensity) {
   uint16_t r = (baseColor >> 11) & 0x1F;
@@ -720,6 +753,11 @@ void setup() {
   displayRotation = 0;
   tft.setRotation(displayRotation);
 
+  displayMutex = xSemaphoreCreateRecursiveMutex();
+  if (displayMutex == nullptr) {
+    Serial.println("[RADAR] Failed to create display mutex.");
+  }
+
   if (AUDIO_AMP_ENABLE_PIN >= 0) {
     pinMode(AUDIO_AMP_ENABLE_PIN, OUTPUT);
     digitalWrite(AUDIO_AMP_ENABLE_PIN, HIGH);
@@ -740,6 +778,23 @@ void setup() {
   closestAircraft.valid = false;
   closestAircraft.squawk = "";
   updateDisplay();
+
+  BaseType_t radarTaskStatus = xTaskCreatePinnedToCore(
+      radarTask,
+      "RadarTask",
+      6144,
+      nullptr,
+      1,
+      &radarTaskHandle,
+      0);
+  if (radarTaskStatus == pdPASS) {
+    radarTaskStarted = true;
+    xTaskNotifyGive(radarTaskHandle);
+    Serial.println("[RADAR] Radar render task started on core 0.");
+  } else {
+    radarTaskHandle = nullptr;
+    Serial.println("[RADAR] Failed to start radar render task; falling back to loop updates.");
+  }
 
   connectWiFi();
   if (WiFi.status() == WL_CONNECTED) {
@@ -779,11 +834,6 @@ void loop() {
       Serial.println("[STREAM] Decoder reported stopped.");
       stopStreamingWithStatus(String("Stream ended"));
     }
-  }
-
-  if (now - lastRadarFrameTime >= RADAR_FRAME_INTERVAL_MS) {
-    lastRadarFrameTime = now;
-    drawRadar();
   }
 
   handleTouch();
@@ -862,6 +912,7 @@ void setupRadarSprite() {
 }
 
 void drawStaticLayout() {
+  ScopedRecursiveLock lock(displayMutex);
   tft.fillScreen(COLOR_BACKGROUND);
   radarAreaY = RADAR_TOP_PADDING;
   radarAreaHeight = tft.height() / 2;
@@ -904,6 +955,7 @@ void drawStaticLayout() {
 }
 
 void renderInfoPanel() {
+  ScopedRecursiveLock lock(displayMutex);
   if (!infoPanelDirty) {
     return;
   }
@@ -1174,6 +1226,39 @@ bool ensureActiveContactFresh(unsigned long now) {
 }
 
 void drawRadar() {
+  if (!radarTaskStarted || radarTaskHandle == nullptr) {
+    renderRadarFrame();
+    return;
+  }
+
+  radarFrameRequested = true;
+  xTaskNotifyGive(radarTaskHandle);
+}
+
+void radarTask(void *param) {
+  const TickType_t waitTicks = pdMS_TO_TICKS(RADAR_FRAME_INTERVAL_MS);
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, waitTicks);
+
+    bool shouldDraw = false;
+    if (radarFrameRequested) {
+      radarFrameRequested = false;
+      shouldDraw = true;
+    }
+
+    unsigned long now = millis();
+    if (!shouldDraw && (now - lastRadarFrameTime) >= RADAR_FRAME_INTERVAL_MS) {
+      shouldDraw = true;
+    }
+
+    if (shouldDraw) {
+      renderRadarFrame();
+    }
+  }
+}
+
+void renderRadarFrame() {
+  ScopedRecursiveLock lock(displayMutex);
   unsigned long now = millis();
   lastRadarFrameTime = now;
   compassLabelBoundsValid = false;
@@ -1717,6 +1802,7 @@ String formatTimeAgo(unsigned long ms) {
 }
 
 void drawStatusBar() {
+  ScopedRecursiveLock lock(displayMutex);
   int iconWidth = WIFI_ICON_BARS * WIFI_ICON_BAR_WIDTH + (WIFI_ICON_BARS - 1) * WIFI_ICON_BAR_SPACING;
   int iconX = tft.width() - RADAR_MARGIN - iconWidth;
   int iconY = RADAR_MARGIN / 2;
@@ -1747,6 +1833,7 @@ void drawStatusBar() {
 }
 
 void drawWifiIcon(int x, int y, int barsActive, bool connected) {
+  ScopedRecursiveLock lock(displayMutex);
   int iconWidth = WIFI_ICON_BARS * WIFI_ICON_BAR_WIDTH + (WIFI_ICON_BARS - 1) * WIFI_ICON_BAR_SPACING;
   tft.fillRect(x, y, iconWidth, WIFI_ICON_HEIGHT, COLOR_BACKGROUND);
 
@@ -1794,6 +1881,7 @@ void configureButtons() {
 }
 
 void drawButtons() {
+  ScopedRecursiveLock lock(displayMutex);
   for (int i = 0; i < BUTTON_COUNT; ++i) {
     drawButton(i);
   }
@@ -1802,6 +1890,7 @@ void drawButtons() {
 }
 
 void drawButton(int index) {
+  ScopedRecursiveLock lock(displayMutex);
   if (index < 0 || index >= BUTTON_COUNT) {
     return;
   }
