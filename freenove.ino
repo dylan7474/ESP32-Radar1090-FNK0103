@@ -15,6 +15,7 @@
 #include "freertos/semphr.h"
 
 #include "config.h"
+#include "plane_icon.h"
 
 // --- Display & Timing Constants ---
 static const uint16_t COLOR_BACKGROUND = TFT_BLACK;
@@ -578,6 +579,7 @@ void serviceAudioDecoder(uint32_t timeBudgetUs, bool nonBlocking) {
   }
 
   const char *stopMessage = nullptr;
+  bool didWork = false;
 
   {
     ScopedLock audioLock(audioMutex, nonBlocking ? 0 : portMAX_DELAY);
@@ -598,6 +600,12 @@ void serviceAudioDecoder(uint32_t timeBudgetUs, bool nonBlocking) {
         break;
       }
 
+      didWork = true;
+
+      if (nonBlocking) {
+        break;
+      }
+
       if (timeBudgetUs > 0) {
         uint32_t elapsed = micros() - startMicros;
         if (elapsed >= timeBudgetUs) {
@@ -611,6 +619,10 @@ void serviceAudioDecoder(uint32_t timeBudgetUs, bool nonBlocking) {
 
   if (stopMessage != nullptr) {
     stopStreamingWithStatus(String(stopMessage));
+  }
+
+  if (nonBlocking && !didWork) {
+    taskYIELD();
   }
 }
 
@@ -683,21 +695,72 @@ class ScopedRecursiveLock {
   bool locked_;
 };
 
+uint16_t applyAircraftIconIntensity(uint16_t baseColor, uint8_t intensity) {
+  uint16_t r = (baseColor >> 11) & 0x1F;
+  uint16_t g = (baseColor >> 5) & 0x3F;
+  uint16_t b = baseColor & 0x1F;
+
+  r = (uint16_t)((r * intensity + 127) / 255);
+  g = (uint16_t)((g * intensity + 127) / 255);
+  b = (uint16_t)((b * intensity + 127) / 255);
+
+  if (r > 0x1F) r = 0x1F;
+  if (g > 0x3F) g = 0x3F;
+  if (b > 0x1F) b = 0x1F;
+
+  return (r << 11) | (g << 5) | b;
+}
+
 template <typename GFX>
 void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, float size, uint16_t color) {
   if (size <= 0.0f || isnan(headingDeg)) {
     return;
   }
 
-  int radius = static_cast<int>(roundf(size * 0.35f));
-  if (radius < 1) {
-    radius = 1;
+  double normalizedHeading = fmod(headingDeg, 360.0);
+  if (normalizedHeading < 0.0) {
+    normalizedHeading += 360.0;
+  }
+  double headingRad = deg2rad(normalizedHeading);
+  double sinHeading = sin(headingRad);
+  double cosHeading = cos(headingRad);
+
+  float scale = (2.0f * size) / max(PLANE_ICON_HEIGHT - 1, 1);
+  if (scale <= 0.0f || isnan(scale)) {
+    return;
   }
 
-  if (radius == 1) {
-    gfx.drawPixel(centerX, centerY, color);
-  } else {
-    gfx.fillCircle(centerX, centerY, radius, color);
+  float halfWidth = (PLANE_ICON_WIDTH - 1) * 0.5f;
+  float halfHeight = (PLANE_ICON_HEIGHT - 1) * 0.5f;
+
+  for (int y = 0; y < PLANE_ICON_HEIGHT; ++y) {
+    serviceAudioDuringRadarDraw();
+    for (int x = 0; x < PLANE_ICON_WIDTH; ++x) {
+      if ((x & 0x07) == 0) {
+        serviceAudioDuringRadarDraw();
+      }
+      int index = y * PLANE_ICON_WIDTH + x;
+      uint8_t alpha = pgm_read_byte(&PLANE_ICON_ALPHA[index]);
+      if (alpha < 16) {
+        continue;
+      }
+
+      uint8_t intensity = pgm_read_byte(&PLANE_ICON_INTENSITY[index]);
+      uint8_t effectiveIntensity = (uint8_t)((intensity * alpha + 127) / 255);
+      if (effectiveIntensity == 0) {
+        continue;
+      }
+
+      float localX = (x - halfWidth) * scale;
+      float localY = (y - halfHeight) * scale;
+      double rotatedX = localX * cosHeading - localY * sinHeading;
+      double rotatedY = localX * sinHeading + localY * cosHeading;
+      int drawX = centerX + (int)round(rotatedX);
+      int drawY = centerY + (int)round(rotatedY);
+
+      uint16_t tintedColor = applyAircraftIconIntensity(color, effectiveIntensity);
+      gfx.drawPixel(drawX, drawY, tintedColor);
+    }
   }
 
   serviceAudioDuringRadarDraw();
