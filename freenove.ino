@@ -530,7 +530,7 @@ void startStreaming() {
   drawButtons();
 }
 
-void serviceAudioDecoder() {
+void serviceAudioDecoder(uint32_t timeBudgetUs) {
   if (!streamPlaying || !mp3) {
     return;
   }
@@ -547,9 +547,11 @@ void serviceAudioDecoder() {
       return;
     }
 
-    uint32_t elapsed = micros() - startMicros;
-    if (elapsed >= AUDIO_SERVICE_TIME_SLICE_US) {
-      break;
+    if (timeBudgetUs > 0) {
+      uint32_t elapsed = micros() - startMicros;
+      if (elapsed >= timeBudgetUs) {
+        break;
+      }
     }
 
     taskYIELD();
@@ -581,7 +583,7 @@ bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 void rotateRadarOrientation();
 void radarTask(void *param);
-void serviceAudioDecoder();
+void serviceAudioDecoder(uint32_t timeBudgetUs = AUDIO_SERVICE_TIME_SLICE_US);
 
 class ScopedRecursiveLock {
  public:
@@ -868,6 +870,7 @@ void loop() {
   }
 
   if (radarFrameReadyToPush) {
+    serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 2);
     double rotationOffsetDeg = radarRotationSteps * 90.0;
     {
       ScopedRecursiveLock lock(displayMutex);
@@ -885,6 +888,7 @@ void loop() {
   }
 
   if (infoPanelDirty) {
+    serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3);
     renderInfoPanel();
   }
 
