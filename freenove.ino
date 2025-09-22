@@ -40,6 +40,8 @@ static const unsigned long RADAR_SWEEP_PERIOD_MS = 4000;
 static const unsigned long RADAR_FADE_DURATION_MS = 4000;
 static const unsigned long RADAR_FRAME_INTERVAL_MS = 40;
 static const uint32_t AUDIO_SERVICE_TIME_SLICE_US = 6000;
+static const uint32_t AUDIO_DRAW_SERVICE_INTERVAL_US = 1500;
+static const uint32_t AUDIO_DRAW_SERVICE_BUDGET_US = AUDIO_SERVICE_TIME_SLICE_US / 2;
 static const double RADAR_SWEEP_WIDTH_DEG = 3.0;
 static const uint16_t COLOR_RADAR_SWEEP = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_ACTIVE = TFT_DARKGREEN;
@@ -127,7 +129,6 @@ unsigned long lastWifiAttempt = 0;
 unsigned long lastSuccessfulFetch = 0;
 unsigned long radarSweepStart = 0;
 volatile unsigned long lastRadarFrameTime = 0;
-volatile bool radarFrameReadyToPush = false;
 
 int radarRangeIndex = 0;
 int alertRangeIndex = 0;
@@ -204,10 +205,37 @@ AudioOutputI2S *audioOutput = nullptr;
 
 bool amplifierEnabled = false;
 TaskHandle_t radarTaskHandle = nullptr;
+TaskHandle_t audioTaskHandle = nullptr;
 volatile bool radarFrameRequested = false;
+volatile bool radarFrameReadyToPush = false;
 bool radarTaskStarted = false;
 SemaphoreHandle_t displayMutex = nullptr;
+SemaphoreHandle_t audioMutex = nullptr;
 bool amplifierStateInitialised = false;
+
+class ScopedLock {
+ public:
+  ScopedLock(SemaphoreHandle_t semaphore, TickType_t waitTicks)
+      : semaphore_(semaphore), locked_(false) {
+    if (semaphore_ == nullptr) {
+      locked_ = true;
+    } else if (xSemaphoreTake(semaphore_, waitTicks) == pdTRUE) {
+      locked_ = true;
+    }
+  }
+
+  ~ScopedLock() {
+    if (semaphore_ != nullptr && locked_) {
+      xSemaphoreGive(semaphore_);
+    }
+  }
+
+  bool isLocked() const { return locked_; }
+
+ private:
+  SemaphoreHandle_t semaphore_;
+  bool locked_;
+};
 
 struct InfoTableRow {
   String label;
@@ -239,6 +267,12 @@ struct CompassLabelBounds {
 
 CompassLabelBounds compassLabelBounds[COMPASS_LABEL_COUNT];
 bool compassLabelBoundsValid = false;
+
+void wakeAudioTask() {
+  if (audioTaskHandle != nullptr) {
+    xTaskNotifyGive(audioTaskHandle);
+  }
+}
 
 void drawButtons();
 void resetRadarContacts();
@@ -390,23 +424,30 @@ void setAmplifierState(bool enable) {
 }
 
 void cleanupStream() {
-  if (mp3) {
-    if (mp3->isRunning()) {
-      mp3->stop();
+  {
+    ScopedLock audioLock(audioMutex, portMAX_DELAY);
+    if (!audioLock.isLocked()) {
+      return;
     }
-    delete mp3;
-    mp3 = nullptr;
-  }
 
-  if (streamFile) {
-    streamFile->close();
-    delete streamFile;
-    streamFile = nullptr;
-  }
+    if (mp3) {
+      if (mp3->isRunning()) {
+        mp3->stop();
+      }
+      delete mp3;
+      mp3 = nullptr;
+    }
 
-  if (audioOutput) {
-    delete audioOutput;
-    audioOutput = nullptr;
+    if (streamFile) {
+      streamFile->close();
+      delete streamFile;
+      streamFile = nullptr;
+    }
+
+    if (audioOutput) {
+      delete audioOutput;
+      audioOutput = nullptr;
+    }
   }
 
   setAmplifierState(false);
@@ -420,6 +461,7 @@ void stopStreamingWithStatus(const String &message) {
   streamPlaying = false;
   setStreamStatus(message);
   drawButtons();
+  wakeAudioTask();
 }
 
 void stopStreaming() {
@@ -527,33 +569,66 @@ void startStreaming() {
   streamPlaying = true;
   setStreamStatus("Streaming");
   Serial.println("[STREAM] Streaming started.");
+  wakeAudioTask();
   drawButtons();
 }
 
-void serviceAudioDecoder() {
+void serviceAudioDecoder(uint32_t timeBudgetUs, bool nonBlocking) {
   if (!streamPlaying || !mp3) {
     return;
   }
 
-  if (!mp3->isRunning()) {
-    return;
-  }
+  const char *stopMessage = nullptr;
 
-  uint32_t startMicros = micros();
-  while (streamPlaying && mp3 && mp3->isRunning()) {
-    if (!mp3->loop()) {
-      Serial.println("[STREAM] Decoder loop returned false.");
-      stopStreamingWithStatus(String("Stream error"));
+  {
+    ScopedLock audioLock(audioMutex, nonBlocking ? 0 : portMAX_DELAY);
+    if (!audioLock.isLocked()) {
       return;
     }
 
-    uint32_t elapsed = micros() - startMicros;
-    if (elapsed >= AUDIO_SERVICE_TIME_SLICE_US) {
-      break;
+    if (!streamPlaying || !mp3 || !mp3->isRunning()) {
+      return;
     }
 
-    taskYIELD();
+    AudioGeneratorMP3 *decoder = mp3;
+    uint32_t startMicros = micros();
+    while (streamPlaying && mp3 == decoder && decoder->isRunning()) {
+      if (!decoder->loop()) {
+        Serial.println("[STREAM] Decoder loop returned false.");
+        stopMessage = "Stream error";
+        break;
+      }
+
+      if (timeBudgetUs > 0) {
+        uint32_t elapsed = micros() - startMicros;
+        if (elapsed >= timeBudgetUs) {
+          break;
+        }
+      }
+
+      taskYIELD();
+    }
   }
+
+  if (stopMessage != nullptr) {
+    stopStreamingWithStatus(String(stopMessage));
+  }
+}
+
+void serviceAudioDuringRadarDraw() {
+  if (!streamPlaying || !mp3 || !mp3->isRunning()) {
+    return;
+  }
+
+  static uint32_t lastServiceMicros = 0;
+  uint32_t now = micros();
+  uint32_t elapsed = now - lastServiceMicros;
+  if (elapsed < AUDIO_DRAW_SERVICE_INTERVAL_US) {
+    return;
+  }
+
+  lastServiceMicros = now;
+  serviceAudioDecoder(AUDIO_DRAW_SERVICE_BUDGET_US, true);
 }
 
 // --- Function Prototypes ---
@@ -581,7 +656,9 @@ bool readTouchPoint(int &screenX, int &screenY);
 void handleTouch();
 void rotateRadarOrientation();
 void radarTask(void *param);
-void serviceAudioDecoder();
+void audioTask(void *param);
+void serviceAudioDecoder(uint32_t timeBudgetUs = AUDIO_SERVICE_TIME_SLICE_US, bool nonBlocking = false);
+void serviceAudioDuringRadarDraw();
 
 class ScopedRecursiveLock {
  public:
@@ -646,7 +723,11 @@ void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, flo
   float halfHeight = (PLANE_ICON_HEIGHT - 1) * 0.5f;
 
   for (int y = 0; y < PLANE_ICON_HEIGHT; ++y) {
+    serviceAudioDuringRadarDraw();
     for (int x = 0; x < PLANE_ICON_WIDTH; ++x) {
+      if ((x & 0x07) == 0) {
+        serviceAudioDuringRadarDraw();
+      }
       int index = y * PLANE_ICON_WIDTH + x;
       uint8_t alpha = pgm_read_byte(&PLANE_ICON_ALPHA[index]);
       if (alpha < 16) {
@@ -670,6 +751,8 @@ void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, flo
       gfx.drawPixel(drawX, drawY, tintedColor);
     }
   }
+
+  serviceAudioDuringRadarDraw();
 }
 
 template <typename GFX>
@@ -787,6 +870,11 @@ void setup() {
     Serial.println("[RADAR] Failed to create display mutex.");
   }
 
+  audioMutex = xSemaphoreCreateMutex();
+  if (audioMutex == nullptr) {
+    Serial.println("[STREAM] Failed to create audio mutex.");
+  }
+
   if (AUDIO_AMP_ENABLE_PIN >= 0) {
     pinMode(AUDIO_AMP_ENABLE_PIN, OUTPUT);
     digitalWrite(AUDIO_AMP_ENABLE_PIN, HIGH);
@@ -825,6 +913,21 @@ void setup() {
     Serial.println("[RADAR] Failed to start radar render task; falling back to loop updates.");
   }
 
+  BaseType_t audioTaskStatus = xTaskCreatePinnedToCore(
+      audioTask,
+      "AudioTask",
+      4096,
+      nullptr,
+      2,
+      &audioTaskHandle,
+      1);
+  if (audioTaskStatus == pdPASS) {
+    Serial.println("[STREAM] Audio service task started on core 1.");
+  } else {
+    audioTaskHandle = nullptr;
+    Serial.println("[STREAM] Failed to start audio service task; decoding will run on loop.");
+  }
+
   connectWiFi();
   if (WiFi.status() == WL_CONNECTED) {
     fetchAircraft();
@@ -856,7 +959,11 @@ void loop() {
   if (streamPlaying && mp3) {
     bool decoderRunningBefore = mp3->isRunning();
     if (decoderRunningBefore) {
-      serviceAudioDecoder();
+      if (audioTaskHandle != nullptr) {
+        serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US / 2, true);
+      } else {
+        serviceAudioDecoder();
+      }
     }
 
     if (streamPlaying && mp3 && !mp3->isRunning()) {
@@ -868,23 +975,39 @@ void loop() {
   }
 
   if (radarFrameReadyToPush) {
+    if (audioTaskHandle != nullptr) {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3, true);
+    } else {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3);
+    }
+
     double rotationOffsetDeg = radarRotationSteps * 90.0;
     {
       ScopedRecursiveLock lock(displayMutex);
       if (radarSpriteActive) {
         int spriteX = radarCenterX - radarRadius;
         int spriteY = radarCenterY - radarRadius;
+        serviceAudioDuringRadarDraw();
         radarSprite.pushSprite(spriteX, spriteY);
+        serviceAudioDuringRadarDraw();
         drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
+        serviceAudioDuringRadarDraw();
         tft.setTextDatum(TL_DATUM);
         tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
         drawStatusBar();
+        serviceAudioDuringRadarDraw();
       }
     }
+
     radarFrameReadyToPush = false;
   }
 
   if (infoPanelDirty) {
+    if (audioTaskHandle != nullptr) {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3, true);
+    } else {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3);
+    }
     renderInfoPanel();
   }
 
@@ -1313,6 +1436,25 @@ void radarTask(void *param) {
   }
 }
 
+void audioTask(void *param) {
+  const TickType_t idleDelay = pdMS_TO_TICKS(10);
+  const TickType_t workDelay = pdMS_TO_TICKS(1);
+  for (;;) {
+    if (!streamPlaying || mp3 == nullptr) {
+      ulTaskNotifyTake(pdTRUE, idleDelay);
+      continue;
+    }
+
+    if (!mp3->isRunning()) {
+      ulTaskNotifyTake(pdTRUE, idleDelay);
+      continue;
+    }
+
+    serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US, false);
+    vTaskDelay(workDelay);
+  }
+}
+
 void renderRadarFrame(bool pushToDisplay) {
   ScopedRecursiveLock lock(displayMutex);
   unsigned long now = millis();
@@ -1342,17 +1484,24 @@ void renderRadarFrame(bool pushToDisplay) {
 
   if (radarSpriteActive) {
     radarSprite.fillSprite(COLOR_BACKGROUND);
+    serviceAudioDuringRadarDraw();
     int spriteCenter = radarSpriteWidth / 2;
 
     radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_OUTLINE);
+    serviceAudioDuringRadarDraw();
     radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius / 2, COLOR_RADAR_OUTLINE);
+    serviceAudioDuringRadarDraw();
     drawRadarCross(radarSprite, spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_GRID, rotationOffsetDeg);
+    serviceAudioDuringRadarDraw();
     drawAirspaceZones(radarSprite, spriteCenter, spriteCenter, radarRadius, rotationOffsetDeg, radarRangeKm);
+    serviceAudioDuringRadarDraw();
     radarSprite.fillCircle(spriteCenter, spriteCenter, 3, COLOR_RADAR_HOME);
+    serviceAudioDuringRadarDraw();
 
     int sweepX = spriteCenter + (int)round(sin(sweepRad) * (radarRadius - 1));
     int sweepY = spriteCenter - (int)round(cos(sweepRad) * (radarRadius - 1));
     radarSprite.drawLine(spriteCenter, spriteCenter, sweepX, sweepY, COLOR_RADAR_SWEEP);
+    serviceAudioDuringRadarDraw();
 
     for (int i = 0; i < radarContactCount; ++i) {
       if (!radarContacts[i].valid) {
@@ -1379,6 +1528,8 @@ void renderRadarFrame(bool pushToDisplay) {
         radarContacts[i].valid = false;
         continue;
       }
+
+      serviceAudioDuringRadarDraw();
 
       double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
       if (normalized > 1.0) {
@@ -1412,6 +1563,7 @@ void renderRadarFrame(bool pushToDisplay) {
     if (!pushToDisplay) {
       radarFrameReadyToPush = true;
     }
+
   } else {
     if (!pushToDisplay) {
       return;
@@ -1426,15 +1578,22 @@ void renderRadarFrame(bool pushToDisplay) {
     }
 
     tft.fillCircle(centerX, centerY, radarRadius, COLOR_BACKGROUND);
+    serviceAudioDuringRadarDraw();
     tft.drawCircle(centerX, centerY, radarRadius, COLOR_RADAR_OUTLINE);
+    serviceAudioDuringRadarDraw();
     tft.drawCircle(centerX, centerY, radarRadius / 2, COLOR_RADAR_OUTLINE);
+    serviceAudioDuringRadarDraw();
     drawRadarCross(tft, centerX, centerY, radarRadius, COLOR_RADAR_GRID, rotationOffsetDeg);
+    serviceAudioDuringRadarDraw();
     drawAirspaceZones(tft, centerX, centerY, radarRadius, rotationOffsetDeg, radarRangeKm);
+    serviceAudioDuringRadarDraw();
     tft.fillCircle(centerX, centerY, 3, COLOR_RADAR_HOME);
+    serviceAudioDuringRadarDraw();
 
     int sweepX = centerX + (int)round(sin(sweepRad) * (radarRadius - 1));
     int sweepY = centerY - (int)round(cos(sweepRad) * (radarRadius - 1));
     tft.drawLine(centerX, centerY, sweepX, sweepY, COLOR_RADAR_SWEEP);
+    serviceAudioDuringRadarDraw();
 
     for (int i = 0; i < radarContactCount; ++i) {
       if (!radarContacts[i].valid) {
@@ -1461,6 +1620,8 @@ void renderRadarFrame(bool pushToDisplay) {
         radarContacts[i].valid = false;
         continue;
       }
+
+      serviceAudioDuringRadarDraw();
 
       double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
       if (normalized > 1.0) {
@@ -1502,11 +1663,13 @@ void renderRadarFrame(bool pushToDisplay) {
     if (radarSpriteActive) {
       int spriteX = radarCenterX - radarRadius;
       int spriteY = radarCenterY - radarRadius;
+      serviceAudioDuringRadarDraw();
       radarSprite.pushSprite(spriteX, spriteY);
-      radarFrameReadyToPush = false;
     }
 
+    serviceAudioDuringRadarDraw();
     drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
+    serviceAudioDuringRadarDraw();
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
 
