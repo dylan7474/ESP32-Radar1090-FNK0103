@@ -207,6 +207,7 @@ bool amplifierEnabled = false;
 TaskHandle_t radarTaskHandle = nullptr;
 TaskHandle_t audioTaskHandle = nullptr;
 volatile bool radarFrameRequested = false;
+volatile bool radarFrameReadyToPush = false;
 bool radarTaskStarted = false;
 SemaphoreHandle_t displayMutex = nullptr;
 SemaphoreHandle_t audioMutex = nullptr;
@@ -973,6 +974,34 @@ void loop() {
     }
   }
 
+  if (radarFrameReadyToPush) {
+    if (audioTaskHandle != nullptr) {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3, true);
+    } else {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3);
+    }
+
+    double rotationOffsetDeg = radarRotationSteps * 90.0;
+    {
+      ScopedRecursiveLock lock(displayMutex);
+      if (radarSpriteActive) {
+        int spriteX = radarCenterX - radarRadius;
+        int spriteY = radarCenterY - radarRadius;
+        serviceAudioDuringRadarDraw();
+        radarSprite.pushSprite(spriteX, spriteY);
+        serviceAudioDuringRadarDraw();
+        drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
+        serviceAudioDuringRadarDraw();
+        tft.setTextDatum(TL_DATUM);
+        tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+        drawStatusBar();
+        serviceAudioDuringRadarDraw();
+      }
+    }
+
+    radarFrameReadyToPush = false;
+  }
+
   if (infoPanelDirty) {
     if (audioTaskHandle != nullptr) {
       serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3, true);
@@ -1398,7 +1427,11 @@ void radarTask(void *param) {
     }
 
     if (shouldDraw) {
-      renderRadarFrame(true);
+      if (radarSpriteActive) {
+        renderRadarFrame(false);
+      } else {
+        radarFrameRequested = false;
+      }
     }
   }
 }
@@ -1433,6 +1466,10 @@ void renderRadarFrame(bool pushToDisplay) {
   double radarRangeKm = currentRadarRangeKm();
   if (radarRangeKm <= 0.0) {
     return;
+  }
+
+  if (pushToDisplay) {
+    radarFrameReadyToPush = false;
   }
 
   bool highlightChanged = false;
@@ -1522,7 +1559,14 @@ void renderRadarFrame(bool pushToDisplay) {
       drawAircraftIcon(radarSprite, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
     }
 
+    if (!pushToDisplay) {
+      radarFrameReadyToPush = true;
+    }
+
   } else {
+    if (!pushToDisplay) {
+      return;
+    }
     int centerX = radarCenterX;
     int centerY = radarCenterY;
 
