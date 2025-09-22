@@ -15,7 +15,6 @@
 #include "freertos/semphr.h"
 
 #include "config.h"
-#include "plane_icon.h"
 
 // --- Display & Timing Constants ---
 static const uint16_t COLOR_BACKGROUND = TFT_BLACK;
@@ -684,22 +683,6 @@ class ScopedRecursiveLock {
   bool locked_;
 };
 
-uint16_t applyAircraftIconIntensity(uint16_t baseColor, uint8_t intensity) {
-  uint16_t r = (baseColor >> 11) & 0x1F;
-  uint16_t g = (baseColor >> 5) & 0x3F;
-  uint16_t b = baseColor & 0x1F;
-
-  r = (uint16_t)((r * intensity + 127) / 255);
-  g = (uint16_t)((g * intensity + 127) / 255);
-  b = (uint16_t)((b * intensity + 127) / 255);
-
-  if (r > 0x1F) r = 0x1F;
-  if (g > 0x3F) g = 0x3F;
-  if (b > 0x1F) b = 0x1F;
-
-  return (r << 11) | (g << 5) | b;
-}
-
 template <typename GFX>
 void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, float size, uint16_t color) {
   if (size <= 0.0f || isnan(headingDeg)) {
@@ -714,44 +697,59 @@ void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, flo
   double sinHeading = sin(headingRad);
   double cosHeading = cos(headingRad);
 
-  float scale = (2.0f * size) / max(PLANE_ICON_HEIGHT - 1, 1);
-  if (scale <= 0.0f || isnan(scale)) {
-    return;
-  }
+  struct BasePoint {
+    float x;
+    float y;
+  };
 
-  float halfWidth = (PLANE_ICON_WIDTH - 1) * 0.5f;
-  float halfHeight = (PLANE_ICON_HEIGHT - 1) * 0.5f;
+  float length = size * 1.6f;
+  float wingSpan = size * 1.2f;
+  float tailSpan = size * 0.6f;
+  float tailLength = size * 0.8f;
 
-  for (int y = 0; y < PLANE_ICON_HEIGHT; ++y) {
-    serviceAudioDuringRadarDraw();
-    for (int x = 0; x < PLANE_ICON_WIDTH; ++x) {
-      if ((x & 0x07) == 0) {
-        serviceAudioDuringRadarDraw();
-      }
-      int index = y * PLANE_ICON_WIDTH + x;
-      uint8_t alpha = pgm_read_byte(&PLANE_ICON_ALPHA[index]);
-      if (alpha < 16) {
-        continue;
-      }
+  constexpr BasePoint basePoints[] = {
+      {0.0f, -length},           // Nose
+      {-wingSpan, 0.0f},         // Left wing tip
+      {-tailSpan, tailLength},   // Left tail
+      {0.0f, length},            // Tail center
+      {tailSpan, tailLength},    // Right tail
+      {wingSpan, 0.0f},          // Right wing tip
+  };
 
-      uint8_t intensity = pgm_read_byte(&PLANE_ICON_INTENSITY[index]);
-      uint8_t effectiveIntensity = (uint8_t)((intensity * alpha + 127) / 255);
-      if (effectiveIntensity == 0) {
-        continue;
-      }
+  struct PixelPoint {
+    int16_t x;
+    int16_t y;
+  };
 
-      float localX = (x - halfWidth) * scale;
-      float localY = (y - halfHeight) * scale;
-      double rotatedX = localX * cosHeading - localY * sinHeading;
-      double rotatedY = localX * sinHeading + localY * cosHeading;
-      int drawX = centerX + (int)round(rotatedX);
-      int drawY = centerY + (int)round(rotatedY);
+  constexpr size_t pointCount = sizeof(basePoints) / sizeof(basePoints[0]);
+  PixelPoint transformed[pointCount];
 
-      uint16_t tintedColor = applyAircraftIconIntensity(color, effectiveIntensity);
-      gfx.drawPixel(drawX, drawY, tintedColor);
+  for (size_t i = 0; i < pointCount; ++i) {
+    float localX = basePoints[i].x;
+    float localY = basePoints[i].y;
+    float rotatedX = localX * cosHeading - localY * sinHeading;
+    float rotatedY = localX * sinHeading + localY * cosHeading;
+    transformed[i].x = centerX + (int)round(rotatedX);
+    transformed[i].y = centerY + (int)round(rotatedY);
+    if ((i & 1U) == 1U) {
+      serviceAudioDuringRadarDraw();
     }
   }
 
+  constexpr uint8_t segments[][2] = {
+      {0, 1}, {0, 5}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {1, 5}, {0, 3}, {2, 4}};
+
+  constexpr size_t segmentCount = sizeof(segments) / sizeof(segments[0]);
+  for (size_t i = 0; i < segmentCount; ++i) {
+    const PixelPoint &from = transformed[segments[i][0]];
+    const PixelPoint &to = transformed[segments[i][1]];
+    gfx.drawLine(from.x, from.y, to.x, to.y, color);
+    if ((i & 1U) == 1U) {
+      serviceAudioDuringRadarDraw();
+    }
+  }
+
+  gfx.drawPixel(centerX, centerY, color);
   serviceAudioDuringRadarDraw();
 }
 
