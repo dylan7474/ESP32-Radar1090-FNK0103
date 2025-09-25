@@ -1960,11 +1960,15 @@ void connectWiFi() {
 
 void fetchAircraft() {
   if (WiFi.status() != WL_CONNECTED) {
-    dataConnectionOk = false;
-    closestAircraft.valid = false;
-    closestAircraft.squawk = "";
-    aircraftCount = 0;
-    resetRadarContacts();
+    {
+      ScopedRecursiveLock lock(displayMutex);
+      dataConnectionOk = false;
+      closestAircraft.valid = false;
+      closestAircraft.squawk = "";
+      aircraftCount = 0;
+      inboundAircraftCount = 0;
+      resetRadarContacts();
+    }
     updateDisplay();
     return;
   }
@@ -1983,11 +1987,15 @@ void fetchAircraft() {
   }
 
   if (!http.begin(url)) {
-    dataConnectionOk = false;
-    closestAircraft.valid = false;
-    closestAircraft.squawk = "";
-    aircraftCount = 0;
-    resetRadarContacts();
+    {
+      ScopedRecursiveLock lock(displayMutex);
+      dataConnectionOk = false;
+      closestAircraft.valid = false;
+      closestAircraft.squawk = "";
+      aircraftCount = 0;
+      inboundAircraftCount = 0;
+      resetRadarContacts();
+    }
     updateDisplay();
     return;
   }
@@ -2001,7 +2009,6 @@ void fetchAircraft() {
     DynamicJsonDocument doc(16384);
     DeserializationError err = deserializeJson(doc, http.getStream());
     if (!err) {
-      dataConnectionOk = true;
       JsonArray arr = doc["aircraft"].as<JsonArray>();
       double bestDistance = 1e12;
       AircraftInfo best;
@@ -2012,18 +2019,26 @@ void fetchAircraft() {
       best.inbound = false;
       best.squawk = "";
       unsigned long fetchTime = millis();
+
       RadarContact previousContacts[MAX_RADAR_CONTACTS];
       bool previousMatched[MAX_RADAR_CONTACTS];
-      int previousCount = radarContactCount;
-      int previousActiveIndex = activeContactIndex;
-      for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
-        previousContacts[i] = radarContacts[i];
-        previousMatched[i] = false;
+      int previousCount = 0;
+      int previousActiveIndex = -1;
+      {
+        ScopedRecursiveLock lock(displayMutex);
+        previousCount = radarContactCount;
+        previousActiveIndex = activeContactIndex;
+        for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
+          previousContacts[i] = radarContacts[i];
+          previousMatched[i] = false;
+        }
       }
 
-      aircraftCount = 0;
-      resetRadarContacts();
+      RadarContact newContacts[MAX_RADAR_CONTACTS];
+      int newContactCount = 0;
+      int newActiveIndex = -1;
       int localInboundCount = 0;
+      int localAircraftCount = 0;
 
       for (JsonObject plane : arr) {
         serviceAudioDecoder();
@@ -2042,7 +2057,7 @@ void fetchAircraft() {
           continue;
         }
 
-        aircraftCount++;
+        localAircraftCount++;
 
         double bearingToHome = calculateBearing(USER_LAT, USER_LON, lat, lon);
         double groundSpeed = NAN;
@@ -2108,7 +2123,8 @@ void fetchAircraft() {
               squawk = String(sqStr);
               squawk.trim();
             }
-          } else if (sqVar.is<int>() || sqVar.is<long>() || sqVar.is<unsigned int>() || sqVar.is<unsigned long>()) {
+          } else if (sqVar.is<int>() || sqVar.is<long>() || sqVar.is<unsigned int>() ||
+                     sqVar.is<unsigned long>()) {
             long sqValue = sqVar.as<long>();
             char buffer[8];
             snprintf(buffer, sizeof(buffer), "%04ld", sqValue);
@@ -2165,8 +2181,8 @@ void fetchAircraft() {
           }
         }
 
-        if (radarContactCount < MAX_RADAR_CONTACTS) {
-          RadarContact &contact = radarContacts[radarContactCount++];
+        if (newContactCount < MAX_RADAR_CONTACTS) {
+          RadarContact contact;
           contact.distanceKm = distance;
           contact.bearing = bearingToHome;
           contact.displayDistanceKm = distance;
@@ -2180,6 +2196,9 @@ void fetchAircraft() {
           contact.track = track;
           contact.displayTrack = track;
           contact.minutesToClosest = minutesToClosest;
+          contact.flight = flight;
+          contact.squawk = squawk;
+
           if (matchIndex >= 0) {
             unsigned long previousHighlight = previousContacts[matchIndex].lastHighlightTime;
             if (previousHighlight != 0 && (fetchTime - previousHighlight) < RADAR_FADE_DURATION_MS) {
@@ -2190,11 +2209,11 @@ void fetchAircraft() {
             contact.displayTrack = previousContacts[matchIndex].displayTrack;
             previousMatched[matchIndex] = true;
             if (matchIndex == previousActiveIndex && contact.lastHighlightTime != 0) {
-              setActiveContact(radarContactCount - 1);
+              newActiveIndex = newContactCount;
             }
           }
-          contact.flight = flight;
-          contact.squawk = squawk;
+
+          newContacts[newContactCount++] = contact;
         }
 
         if (distance < bestDistance) {
@@ -2206,14 +2225,13 @@ void fetchAircraft() {
           best.track = track;
           best.minutesToClosest = minutesToClosest;
           best.inbound = inbound;
-
           best.flight = flight;
           best.squawk = squawk;
           best.altitude = altitude;
         }
       }
 
-      for (int i = 0; i < previousCount && radarContactCount < MAX_RADAR_CONTACTS; ++i) {
+      for (int i = 0; i < previousCount && newContactCount < MAX_RADAR_CONTACTS; ++i) {
         if (previousMatched[i] || !previousContacts[i].valid) {
           continue;
         }
@@ -2221,21 +2239,68 @@ void fetchAircraft() {
         if (lastHighlight == 0 || (fetchTime - lastHighlight) > RADAR_FADE_DURATION_MS) {
           continue;
         }
-        RadarContact &contact = radarContacts[radarContactCount++];
-        contact = previousContacts[i];
+        RadarContact contact = previousContacts[i];
         contact.valid = true;
         contact.stale = true;
-        if (i == previousActiveIndex && contact.lastHighlightTime != 0) {
-          setActiveContact(radarContactCount - 1);
+        if (i == previousActiveIndex && contact.lastHighlightTime != 0 && newActiveIndex < 0) {
+          newActiveIndex = newContactCount;
         }
+        newContacts[newContactCount++] = contact;
       }
 
-      closestAircraft = best;
-      inboundAircraftCount = localInboundCount;
-      if (best.valid) {
-        lastSuccessfulFetch = fetchTime;
+      {
+        ScopedRecursiveLock lock(displayMutex);
+        dataConnectionOk = true;
+        aircraftCount = localAircraftCount;
+        inboundAircraftCount = localInboundCount;
+        closestAircraft = best;
+        if (best.valid) {
+          lastSuccessfulFetch = fetchTime;
+        }
+
+        radarContactCount = newContactCount;
+        for (int i = 0; i < newContactCount; ++i) {
+          radarContacts[i] = newContacts[i];
+        }
+        for (int i = newContactCount; i < MAX_RADAR_CONTACTS; ++i) {
+          radarContacts[i].valid = false;
+          radarContacts[i].flight = "";
+          radarContacts[i].lastHighlightTime = 0;
+          radarContacts[i].stale = false;
+          radarContacts[i].distanceKm = 0.0;
+          radarContacts[i].bearing = 0.0;
+          radarContacts[i].displayDistanceKm = 0.0;
+          radarContacts[i].displayBearing = 0.0;
+          radarContacts[i].minutesToClosest = NAN;
+          radarContacts[i].groundSpeed = NAN;
+          radarContacts[i].track = NAN;
+          radarContacts[i].displayTrack = NAN;
+          radarContacts[i].altitude = -1;
+          radarContacts[i].squawk = "";
+        }
+
+        if (newActiveIndex >= 0 && newActiveIndex < newContactCount) {
+          activeContactIndex = newActiveIndex;
+        } else {
+          activeContactIndex = -1;
+        }
+
+        markInfoPanelDirty();
       }
     } else {
+      {
+        ScopedRecursiveLock lock(displayMutex);
+        dataConnectionOk = false;
+        closestAircraft.valid = false;
+        closestAircraft.squawk = "";
+        aircraftCount = 0;
+        inboundAircraftCount = 0;
+        resetRadarContacts();
+      }
+    }
+  } else {
+    {
+      ScopedRecursiveLock lock(displayMutex);
       dataConnectionOk = false;
       closestAircraft.valid = false;
       closestAircraft.squawk = "";
@@ -2243,13 +2308,6 @@ void fetchAircraft() {
       inboundAircraftCount = 0;
       resetRadarContacts();
     }
-  } else {
-    dataConnectionOk = false;
-    closestAircraft.valid = false;
-    closestAircraft.squawk = "";
-    aircraftCount = 0;
-    inboundAircraftCount = 0;
-    resetRadarContacts();
   }
 
   http.end();
