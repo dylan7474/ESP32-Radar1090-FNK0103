@@ -112,6 +112,7 @@ int radarSpriteHeight = 0;
 // Forward declarations for helpers referenced before their definitions.
 void invalidateRadarBackground();
 void markInfoPanelDirty();
+void performDisplayUpdate();
 
 struct AircraftInfo {
   String flight;
@@ -215,6 +216,7 @@ AudioFileSourceICYStream *streamFile = nullptr;
 AudioOutputI2S *audioOutput = nullptr;
 
 bool amplifierEnabled = false;
+TaskHandle_t loopTaskHandle = nullptr;
 TaskHandle_t radarTaskHandle = nullptr;
 TaskHandle_t audioTaskHandle = nullptr;
 TaskHandle_t fetchTaskHandle = nullptr;
@@ -225,6 +227,7 @@ SemaphoreHandle_t displayMutex = nullptr;
 SemaphoreHandle_t audioMutex = nullptr;
 bool amplifierStateInitialised = false;
 volatile bool fetchInProgress = false;
+volatile bool updateDisplayPendingOnLoop = false;
 
 class ScopedLock {
  public:
@@ -929,6 +932,7 @@ void drawAirspaceZones(GFX &gfx, int centerX, int centerY, int radius, double ro
 
 void setup() {
   Serial.begin(115200);
+  loopTaskHandle = xTaskGetCurrentTaskHandle();
   tft.begin();
   displayRotation = 0;
   tft.setRotation(displayRotation);
@@ -1021,6 +1025,11 @@ void setup() {
 void loop() {
   unsigned long now = millis();
   wl_status_t wifiStatus = WiFi.status();
+
+  if (updateDisplayPendingOnLoop) {
+    updateDisplayPendingOnLoop = false;
+    performDisplayUpdate();
+  }
 
   if (wifiStatus != WL_CONNECTED) {
     if (now - lastWifiAttempt > WIFI_RETRY_INTERVAL_MS) {
@@ -1535,11 +1544,27 @@ void renderInfoPanel() {
   infoPanelDirty = newUpdateQueued;
 }
 
-void updateDisplay() {
-  markInfoPanelDirty();
+void performDisplayUpdate() {
   renderInfoPanel();
   drawRadar();
   tft.setTextSize(1);
+}
+
+void updateDisplay() {
+  markInfoPanelDirty();
+
+  TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
+  if (loopTaskHandle != nullptr && currentTask != loopTaskHandle) {
+    updateDisplayPendingOnLoop = true;
+    if (radarTaskHandle != nullptr) {
+      radarFrameRequested = true;
+      xTaskNotifyGive(radarTaskHandle);
+    }
+    return;
+  }
+
+  updateDisplayPendingOnLoop = false;
+  performDisplayUpdate();
 }
 
 bool setActiveContact(int index) {
