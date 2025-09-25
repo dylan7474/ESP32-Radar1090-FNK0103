@@ -111,6 +111,7 @@ int radarSpriteHeight = 0;
 
 // Forward declarations for helpers referenced before their definitions.
 void invalidateRadarBackground();
+void markInfoPanelDirty();
 
 struct AircraftInfo {
   String flight;
