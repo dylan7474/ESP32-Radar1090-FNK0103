@@ -40,8 +40,9 @@ static const unsigned long RADAR_SWEEP_PERIOD_MS = 6000;
 static const unsigned long RADAR_FADE_DURATION_MS = 4000;
 static const unsigned long RADAR_FRAME_INTERVAL_MS = 60;
 static const uint32_t AUDIO_SERVICE_TIME_SLICE_US = 6000;
-static const uint32_t AUDIO_DRAW_SERVICE_INTERVAL_US = 1500;
-static const uint32_t AUDIO_DRAW_SERVICE_BUDGET_US = AUDIO_SERVICE_TIME_SLICE_US / 2;
+static const uint32_t AUDIO_DRAW_SERVICE_INTERVAL_US = 3500;
+static const uint32_t AUDIO_DRAW_SERVICE_BUDGET_US = 2000;
+static const uint32_t AUDIO_DRAW_MAX_SERVICES_PER_FRAME = 10;
 static const double RADAR_SWEEP_WIDTH_DEG = 5.0;
 static const uint16_t COLOR_RADAR_SWEEP = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_ACTIVE = TFT_DARKGREEN;
@@ -133,6 +134,10 @@ unsigned long lastWifiAttempt = 0;
 unsigned long lastSuccessfulFetch = 0;
 unsigned long radarSweepStart = 0;
 volatile unsigned long lastRadarFrameTime = 0;
+
+volatile uint32_t radarFrameSerial = 0;
+volatile uint32_t audioServiceFrameSerial = 0;
+volatile uint32_t audioServicesThisFrame = 0;
 
 int radarRangeIndex = 0;
 int alertRangeIndex = 0;
@@ -626,6 +631,23 @@ void serviceAudioDuringRadarDraw() {
   }
 
   static uint32_t lastServiceMicros = 0;
+  static uint32_t lastFrameSerial = 0;
+
+  uint32_t activeFrame = radarFrameSerial;
+  if (audioServiceFrameSerial != activeFrame) {
+    audioServiceFrameSerial = activeFrame;
+    audioServicesThisFrame = 0;
+  }
+
+  if (activeFrame != lastFrameSerial) {
+    lastFrameSerial = activeFrame;
+    lastServiceMicros = 0;
+  }
+
+  if (audioServicesThisFrame >= AUDIO_DRAW_MAX_SERVICES_PER_FRAME) {
+    return;
+  }
+
   uint32_t now = micros();
   uint32_t elapsed = now - lastServiceMicros;
   if (elapsed < AUDIO_DRAW_SERVICE_INTERVAL_US) {
@@ -633,6 +655,7 @@ void serviceAudioDuringRadarDraw() {
   }
 
   lastServiceMicros = now;
+  audioServicesThisFrame++;
   serviceAudioDecoder(AUDIO_DRAW_SERVICE_BUDGET_US, true);
 }
 
@@ -1474,6 +1497,9 @@ void audioTask(void *param) {
 
 void renderRadarFrame(bool pushToDisplay) {
   ScopedRecursiveLock lock(displayMutex);
+  uint32_t frameSerial = ++radarFrameSerial;
+  audioServiceFrameSerial = frameSerial;
+  audioServicesThisFrame = 0;
   unsigned long now = millis();
   lastRadarFrameTime = now;
   compassLabelBoundsValid = false;
