@@ -216,7 +216,7 @@ AudioFileSourceICYStream *streamFile = nullptr;
 AudioOutputI2S *audioOutput = nullptr;
 
 bool amplifierEnabled = false;
-TaskHandle_t loopTaskHandle = nullptr;
+extern TaskHandle_t loopTaskHandle;
 TaskHandle_t radarTaskHandle = nullptr;
 TaskHandle_t audioTaskHandle = nullptr;
 TaskHandle_t fetchTaskHandle = nullptr;
