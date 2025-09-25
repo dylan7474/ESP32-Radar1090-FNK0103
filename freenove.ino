@@ -6,6 +6,7 @@
 #include <SPI.h>
 #include <math.h>
 #include <cstring>
+#include <vector>
 #include <EEPROM.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
@@ -83,6 +84,7 @@ static const int WIFI_ICON_BARS = 4;
 static const int WIFI_ICON_BAR_WIDTH = 5;
 static const int WIFI_ICON_BAR_SPACING = 3;
 static const int WIFI_ICON_HEIGHT = 20;
+static const int RADAR_CONTACT_AUDIO_INTERVAL = 3;
 
 static const double RADAR_RANGE_OPTIONS_KM[] = {5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 300.0};
 static const int RADAR_RANGE_OPTION_COUNT = sizeof(RADAR_RANGE_OPTIONS_KM) / sizeof(RADAR_RANGE_OPTIONS_KM[0]);
@@ -106,6 +108,13 @@ TFT_eSprite radarSprite = TFT_eSprite(&tft);
 bool radarSpriteActive = false;
 int radarSpriteWidth = 0;
 int radarSpriteHeight = 0;
+std::vector<uint16_t> radarBackgroundPixels;
+bool radarBackgroundValid = false;
+int radarBackgroundWidth = 0;
+int radarBackgroundHeight = 0;
+int radarBackgroundRadius = 0;
+double radarBackgroundRangeKm = -1.0;
+double radarBackgroundRotationDeg = 0.0;
 
 struct AircraftInfo {
   String flight;
@@ -366,6 +375,7 @@ void cycleRadarRange() {
     return;
   }
   radarRangeIndex = (radarRangeIndex + 1) % RADAR_RANGE_OPTION_COUNT;
+  invalidateRadarBackground();
   persistSettings();
 }
 
@@ -638,6 +648,8 @@ void drawInfoLine(int index, const String &text);
 void drawRadar();
 void renderRadarFrame(bool pushToDisplay);
 void resetRadarContacts();
+void invalidateRadarBackground();
+void ensureRadarBackground(double rotationOffsetDeg, double radarRangeKm);
 void setupRadarSprite();
 void connectWiFi();
 void fetchAircraft();
@@ -1060,11 +1072,68 @@ void resetRadarContacts() {
   infoPanelDirty = true;
 }
 
+void invalidateRadarBackground() {
+  radarBackgroundValid = false;
+  radarBackgroundPixels.clear();
+  radarBackgroundWidth = 0;
+  radarBackgroundHeight = 0;
+  radarBackgroundRadius = 0;
+  radarBackgroundRangeKm = -1.0;
+  radarBackgroundRotationDeg = 0.0;
+}
+
+void ensureRadarBackground(double rotationOffsetDeg, double radarRangeKm) {
+  if (!radarSpriteActive) {
+    return;
+  }
+
+  size_t pixelCount = (size_t)radarSpriteWidth * (size_t)radarSpriteHeight;
+  if (pixelCount == 0) {
+    return;
+  }
+
+  uint16_t *spriteBuffer = static_cast<uint16_t *>(radarSprite.getPointer());
+  if (spriteBuffer == nullptr) {
+    return;
+  }
+
+  bool regenerate = !radarBackgroundValid || radarBackgroundWidth != radarSpriteWidth ||
+                    radarBackgroundHeight != radarSpriteHeight ||
+                    radarBackgroundRadius != radarRadius ||
+                    fabs(radarBackgroundRotationDeg - rotationOffsetDeg) > 0.01 ||
+                    fabs(radarBackgroundRangeKm - radarRangeKm) > 0.01;
+
+  if (regenerate) {
+    radarSprite.fillSprite(COLOR_BACKGROUND);
+    int spriteCenter = radarSpriteWidth / 2;
+    radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_OUTLINE);
+    radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius / 2, COLOR_RADAR_OUTLINE);
+    drawRadarCross(radarSprite, spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_GRID,
+                   rotationOffsetDeg);
+    drawAirspaceZones(radarSprite, spriteCenter, spriteCenter, radarRadius, rotationOffsetDeg,
+                      radarRangeKm);
+    radarSprite.fillCircle(spriteCenter, spriteCenter, 3, COLOR_RADAR_HOME);
+
+    radarBackgroundPixels.resize(pixelCount);
+    memcpy(radarBackgroundPixels.data(), spriteBuffer, pixelCount * sizeof(uint16_t));
+    radarBackgroundValid = true;
+    radarBackgroundWidth = radarSpriteWidth;
+    radarBackgroundHeight = radarSpriteHeight;
+    radarBackgroundRadius = radarRadius;
+    radarBackgroundRangeKm = radarRangeKm;
+    radarBackgroundRotationDeg = rotationOffsetDeg;
+  } else if (!radarBackgroundPixels.empty()) {
+    memcpy(spriteBuffer, radarBackgroundPixels.data(), pixelCount * sizeof(uint16_t));
+  }
+}
+
 void setupRadarSprite() {
   if (radarSpriteActive) {
     radarSprite.deleteSprite();
     radarSpriteActive = false;
   }
+
+  invalidateRadarBackground();
 
   if (radarRadius <= 0) {
     return;
@@ -1490,26 +1559,16 @@ void renderRadarFrame(bool pushToDisplay) {
   bool flashOn = ((now / 400) % 2) == 0;
 
   if (radarSpriteActive) {
-    radarSprite.fillSprite(COLOR_BACKGROUND);
+    ensureRadarBackground(rotationOffsetDeg, radarRangeKm);
     serviceAudioDuringRadarDraw();
+
     int spriteCenter = radarSpriteWidth / 2;
-
-    radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_OUTLINE);
-    serviceAudioDuringRadarDraw();
-    radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius / 2, COLOR_RADAR_OUTLINE);
-    serviceAudioDuringRadarDraw();
-    drawRadarCross(radarSprite, spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_GRID, rotationOffsetDeg);
-    serviceAudioDuringRadarDraw();
-    drawAirspaceZones(radarSprite, spriteCenter, spriteCenter, radarRadius, rotationOffsetDeg, radarRangeKm);
-    serviceAudioDuringRadarDraw();
-    radarSprite.fillCircle(spriteCenter, spriteCenter, 3, COLOR_RADAR_HOME);
-    serviceAudioDuringRadarDraw();
-
     int sweepX = spriteCenter + (int)round(sin(sweepRad) * (radarRadius - 1));
     int sweepY = spriteCenter - (int)round(cos(sweepRad) * (radarRadius - 1));
     radarSprite.drawLine(spriteCenter, spriteCenter, sweepX, sweepY, COLOR_RADAR_SWEEP);
     serviceAudioDuringRadarDraw();
 
+    int audioYieldCounter = 0;
     for (int i = 0; i < radarContactCount; ++i) {
       if (!radarContacts[i].valid) {
         continue;
@@ -1536,7 +1595,10 @@ void renderRadarFrame(bool pushToDisplay) {
         continue;
       }
 
-      serviceAudioDuringRadarDraw();
+      if (++audioYieldCounter >= RADAR_CONTACT_AUDIO_INTERVAL) {
+        serviceAudioDuringRadarDraw();
+        audioYieldCounter = 0;
+      }
 
       double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
       if (normalized > 1.0) {
@@ -1564,8 +1626,11 @@ void renderRadarFrame(bool pushToDisplay) {
       if (isnan(headingDeg)) {
         headingDeg = radarContacts[i].displayBearing;
       }
-      drawAircraftIcon(radarSprite, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
+      drawAircraftIcon(radarSprite, contactX, contactY, headingDeg + rotationOffsetDeg,
+                       AIRCRAFT_ICON_SIZE, fadedColor);
     }
+
+    serviceAudioDuringRadarDraw();
 
     if (!pushToDisplay) {
       radarFrameReadyToPush = true;
@@ -1585,15 +1650,10 @@ void renderRadarFrame(bool pushToDisplay) {
     }
 
     tft.fillCircle(centerX, centerY, radarRadius, COLOR_BACKGROUND);
-    serviceAudioDuringRadarDraw();
     tft.drawCircle(centerX, centerY, radarRadius, COLOR_RADAR_OUTLINE);
-    serviceAudioDuringRadarDraw();
     tft.drawCircle(centerX, centerY, radarRadius / 2, COLOR_RADAR_OUTLINE);
-    serviceAudioDuringRadarDraw();
     drawRadarCross(tft, centerX, centerY, radarRadius, COLOR_RADAR_GRID, rotationOffsetDeg);
-    serviceAudioDuringRadarDraw();
     drawAirspaceZones(tft, centerX, centerY, radarRadius, rotationOffsetDeg, radarRangeKm);
-    serviceAudioDuringRadarDraw();
     tft.fillCircle(centerX, centerY, 3, COLOR_RADAR_HOME);
     serviceAudioDuringRadarDraw();
 
@@ -1602,6 +1662,7 @@ void renderRadarFrame(bool pushToDisplay) {
     tft.drawLine(centerX, centerY, sweepX, sweepY, COLOR_RADAR_SWEEP);
     serviceAudioDuringRadarDraw();
 
+    int audioYieldCounter = 0;
     for (int i = 0; i < radarContactCount; ++i) {
       if (!radarContacts[i].valid) {
         continue;
@@ -1628,7 +1689,10 @@ void renderRadarFrame(bool pushToDisplay) {
         continue;
       }
 
-      serviceAudioDuringRadarDraw();
+      if (++audioYieldCounter >= RADAR_CONTACT_AUDIO_INTERVAL) {
+        serviceAudioDuringRadarDraw();
+        audioYieldCounter = 0;
+      }
 
       double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
       if (normalized > 1.0) {
@@ -1656,9 +1720,11 @@ void renderRadarFrame(bool pushToDisplay) {
       if (isnan(headingDeg)) {
         headingDeg = radarContacts[i].displayBearing;
       }
-      drawAircraftIcon(tft, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE, fadedColor);
+      drawAircraftIcon(tft, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE,
+                       fadedColor);
     }
 
+    serviceAudioDuringRadarDraw();
   }
 
   bool cleared = ensureActiveContactFresh(now);
@@ -2229,6 +2295,7 @@ bool readTouchPoint(int &screenX, int &screenY) {
 void rotateRadarOrientation() {
   radarRotationSteps = (radarRotationSteps + 1) % 4;
   compassLabelBoundsValid = false;
+  invalidateRadarBackground();
   drawRadar();
   persistSettings();
 }
