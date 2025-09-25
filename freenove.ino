@@ -36,13 +36,13 @@ static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
 static const int RADAR_MARGIN = 12;
 static const int RADAR_TOP_PADDING = 24;
 static const int MAX_RADAR_CONTACTS = 40;
-static const unsigned long RADAR_SWEEP_PERIOD_MS = 4000;
+static const unsigned long RADAR_SWEEP_PERIOD_MS = 6000;
 static const unsigned long RADAR_FADE_DURATION_MS = 4000;
-static const unsigned long RADAR_FRAME_INTERVAL_MS = 40;
+static const unsigned long RADAR_FRAME_INTERVAL_MS = 60;
 static const uint32_t AUDIO_SERVICE_TIME_SLICE_US = 6000;
 static const uint32_t AUDIO_DRAW_SERVICE_INTERVAL_US = 1500;
 static const uint32_t AUDIO_DRAW_SERVICE_BUDGET_US = AUDIO_SERVICE_TIME_SLICE_US / 2;
-static const double RADAR_SWEEP_WIDTH_DEG = 3.0;
+static const double RADAR_SWEEP_WIDTH_DEG = 5.0;
 static const uint16_t COLOR_RADAR_SWEEP = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_ACTIVE = TFT_DARKGREEN;
 static const uint16_t COLOR_BUTTON_INACTIVE = TFT_DARKGREY;
@@ -1265,6 +1265,7 @@ void renderInfoPanel() {
                              infoPanelCache.cachedRowCount != rowCount;
 
   if (rowStructureChanged) {
+    serviceAudioDuringRadarDraw();
     tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_INFO_TABLE_BG);
     tft.drawRect(infoAreaX, infoAreaY, infoAreaWidth, textAreaHeight, COLOR_INFO_TABLE_BORDER);
 
@@ -1272,6 +1273,7 @@ void renderInfoPanel() {
       int tableHeight = rowCount * INFO_TABLE_ROW_HEIGHT;
       tft.drawFastVLine(dividerX, tableTop, tableHeight, COLOR_INFO_TABLE_BORDER);
       for (int i = 0; i < rowCount; ++i) {
+        serviceAudioDuringRadarDraw();
         int rowY = tableTop + i * INFO_TABLE_ROW_HEIGHT;
         tft.drawFastHLine(infoAreaX, rowY, infoAreaWidth, COLOR_INFO_TABLE_BORDER);
       }
@@ -1284,6 +1286,7 @@ void renderInfoPanel() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COLOR_TEXT, COLOR_INFO_TABLE_BG);
   for (int i = 0; i < rowsToProcess; ++i) {
+    serviceAudioDuringRadarDraw();
     bool rowExists = i < rowCount;
     bool hadRow = i < infoPanelCache.cachedRowCount;
     bool rowChanged = rowStructureChanged || (rowExists && (!hadRow || rows[i].label != infoPanelCache.cachedRows[i].label ||
@@ -1309,6 +1312,8 @@ void renderInfoPanel() {
       }
     }
 
+    serviceAudioDuringRadarDraw();
+
     if (rowExists) {
       int textY = rowY + max((INFO_TABLE_ROW_HEIGHT - textHeight) / 2, 0);
       int labelWidth = dividerX - infoAreaX - INFO_TABLE_PADDING * 2;
@@ -1325,6 +1330,8 @@ void renderInfoPanel() {
       tft.drawString(rows[i].value, dividerX + INFO_TABLE_PADDING, textY);
     }
   }
+
+  serviceAudioDuringRadarDraw();
 
   tft.setTextPadding(0);
   tft.setTextDatum(TL_DATUM);
