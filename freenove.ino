@@ -116,6 +116,9 @@ int radarBackgroundRadius = 0;
 double radarBackgroundRangeKm = -1.0;
 double radarBackgroundRotationDeg = 0.0;
 
+// Forward declarations for helpers referenced before their definitions.
+void invalidateRadarBackground();
+
 struct AircraftInfo {
   String flight;
   double distanceKm;
