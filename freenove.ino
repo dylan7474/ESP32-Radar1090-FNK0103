@@ -217,12 +217,14 @@ AudioOutputI2S *audioOutput = nullptr;
 bool amplifierEnabled = false;
 TaskHandle_t radarTaskHandle = nullptr;
 TaskHandle_t audioTaskHandle = nullptr;
+TaskHandle_t fetchTaskHandle = nullptr;
 volatile bool radarFrameRequested = false;
 volatile bool radarFrameReadyToPush = false;
 bool radarTaskStarted = false;
 SemaphoreHandle_t displayMutex = nullptr;
 SemaphoreHandle_t audioMutex = nullptr;
 bool amplifierStateInitialised = false;
+volatile bool fetchInProgress = false;
 
 class ScopedLock {
  public:
@@ -444,7 +446,7 @@ void handleRangeButton(ButtonType type) {
   aircraftCount = 0;
   inboundAircraftCount = 0;
   updateDisplay();
-  fetchAircraft();
+  requestAircraftFetch();
   lastFetchTime = millis();
 }
 
@@ -704,6 +706,8 @@ void invalidateRadarBackground();
 void setupRadarSprite();
 void connectWiFi();
 void fetchAircraft();
+void requestAircraftFetch();
+void aircraftFetchTask(void *param);
 double haversine(double lat1, double lon1, double lat2, double lon2);
 double calculateBearing(double lat1, double lon1, double lat2, double lon2);
 double deg2rad(double deg);
@@ -992,9 +996,24 @@ void setup() {
     Serial.println("[STREAM] Failed to start audio service task; decoding will run on loop.");
   }
 
+  BaseType_t fetchTaskStatus = xTaskCreatePinnedToCore(
+      aircraftFetchTask,
+      "FetchTask",
+      6144,
+      nullptr,
+      0,
+      &fetchTaskHandle,
+      1);
+  if (fetchTaskStatus == pdPASS) {
+    Serial.println("[NET] Aircraft fetch task started on core 1.");
+  } else {
+    fetchTaskHandle = nullptr;
+    Serial.println("[NET] Failed to start aircraft fetch task; updates will run on loop.");
+  }
+
   connectWiFi();
   if (WiFi.status() == WL_CONNECTED) {
-    fetchAircraft();
+    requestAircraftFetch();
     lastFetchTime = millis();
   }
 }
@@ -1010,9 +1029,9 @@ void loop() {
     wifiStatus = WiFi.status();
   }
 
-  if (now - lastFetchTime >= REFRESH_INTERVAL_MS) {
+  if (!fetchInProgress && (now - lastFetchTime) >= REFRESH_INTERVAL_MS) {
     lastFetchTime = now;
-    fetchAircraft();
+    requestAircraftFetch();
   }
 
   if (wifiStatus != WL_CONNECTED && streamPlaying) {
@@ -1619,6 +1638,42 @@ void audioTask(void *param) {
 
     serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US, false);
     vTaskDelay(workDelay);
+  }
+}
+
+void requestAircraftFetch() {
+  if (fetchTaskHandle != nullptr) {
+    xTaskNotifyGive(fetchTaskHandle);
+    return;
+  }
+
+  if (fetchInProgress) {
+    return;
+  }
+
+  fetchInProgress = true;
+  fetchAircraft();
+  fetchInProgress = false;
+}
+
+void aircraftFetchTask(void *param) {
+  for (;;) {
+    if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0) {
+      continue;
+    }
+
+    for (;;) {
+      fetchInProgress = true;
+      fetchAircraft();
+      fetchInProgress = false;
+
+      uint32_t pending = ulTaskNotifyTake(pdTRUE, 0);
+      if (pending == 0) {
+        break;
+      }
+    }
+
+    taskYIELD();
   }
 }
 
