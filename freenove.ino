@@ -10,6 +10,7 @@
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioOutputI2S.h>
+#include <new>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -171,10 +172,7 @@ struct AirspaceZone {
 
 static const int AIRSPACE_LABEL_TEXT_SIZE = 1;
 
-// Reuse a single JSON document to avoid heap fragmentation from repeated
-// DynamicJsonDocument allocations while the audio stream is active.
 static const size_t AIRCRAFT_JSON_DOC_CAPACITY = 16384;
-static StaticJsonDocument<AIRCRAFT_JSON_DOC_CAPACITY> aircraftJsonDoc;
 
 static const AirspaceZone AIRSPACE_ZONES[] = {
     // Approximate airport control zones drawn with a 10 NM (~18.5 km) radius
@@ -217,6 +215,7 @@ String streamStatusMessage = "Stream stopped";
 AudioGeneratorMP3 *mp3 = nullptr;
 AudioFileSourceICYStream *streamFile = nullptr;
 AudioOutputI2S *audioOutput = nullptr;
+DynamicJsonDocument *aircraftJsonDoc = nullptr;
 
 bool amplifierEnabled = false;
 TaskHandle_t radarTaskHandle = nullptr;
@@ -227,6 +226,7 @@ volatile bool radarFrameReadyToPush = false;
 bool radarTaskStarted = false;
 SemaphoreHandle_t displayMutex = nullptr;
 SemaphoreHandle_t audioMutex = nullptr;
+SemaphoreHandle_t aircraftJsonMutex = nullptr;
 bool amplifierStateInitialised = false;
 
 class ScopedLock {
@@ -460,6 +460,40 @@ void setStreamStatus(const String &status) {
   markInfoPanelDirty();
 }
 
+DynamicJsonDocument *ensureAircraftJsonDocumentLocked() {
+  if (aircraftJsonDoc == nullptr) {
+    aircraftJsonDoc = new (std::nothrow) DynamicJsonDocument(AIRCRAFT_JSON_DOC_CAPACITY);
+    if (aircraftJsonDoc == nullptr) {
+      Serial.println("[DATA] Failed to allocate aircraft JSON buffer.");
+      return nullptr;
+    }
+  } else {
+    aircraftJsonDoc->clear();
+  }
+  return aircraftJsonDoc;
+}
+
+static void purgeAircraftJsonDocumentLocked() {
+  if (aircraftJsonDoc != nullptr) {
+    delete aircraftJsonDoc;
+    aircraftJsonDoc = nullptr;
+  }
+}
+
+void purgeAircraftJsonDocument() {
+  if (aircraftJsonMutex == nullptr) {
+    purgeAircraftJsonDocumentLocked();
+    return;
+  }
+
+  ScopedLock docLock(aircraftJsonMutex, portMAX_DELAY);
+  if (!docLock.isLocked()) {
+    return;
+  }
+
+  purgeAircraftJsonDocumentLocked();
+}
+
 void setAmplifierState(bool enable) {
   if (AUDIO_AMP_ENABLE_PIN < 0) {
     return;
@@ -536,6 +570,7 @@ void startStreaming() {
 
   setStreamStatus("Connecting...");
   cleanupStream();
+  purgeAircraftJsonDocument();
 
   streamFile = new AudioFileSourceICYStream();
   if (!streamFile) {
@@ -610,7 +645,8 @@ void startStreaming() {
   }
 
   if (!mp3->begin(streamFile, audioOutput)) {
-    Serial.println("[STREAM] MP3 decoder failed to start.");
+    Serial.print("[STREAM] MP3 decoder failed to start. Free heap: ");
+    Serial.println(ESP.getFreeHeap());
     cleanupStream();
     setStreamStatus("Decoder error");
     drawButtons();
@@ -709,6 +745,8 @@ void renderRadarFrame(bool pushToDisplay);
 void resetRadarContacts();
 void invalidateRadarBackground();
 void setupRadarSprite();
+DynamicJsonDocument *ensureAircraftJsonDocumentLocked();
+void purgeAircraftJsonDocument();
 void connectWiFi();
 void fetchAircraft();
 double haversine(double lat1, double lon1, double lat2, double lon2);
@@ -963,6 +1001,11 @@ void setup() {
   audioMutex = xSemaphoreCreateMutex();
   if (audioMutex == nullptr) {
     Serial.println("[STREAM] Failed to create audio mutex.");
+  }
+
+  aircraftJsonMutex = xSemaphoreCreateMutex();
+  if (aircraftJsonMutex == nullptr) {
+    Serial.println("[DATA] Failed to create JSON mutex.");
   }
 
   if (AUDIO_AMP_ENABLE_PIN >= 0) {
@@ -1966,19 +2009,6 @@ void fetchAircraft() {
     return;
   }
 
-  aircraftJsonDoc.clear();
-  DeserializationError err = deserializeJson(aircraftJsonDoc, http.getStream()); // CPU INTENSIVE - NO LOCK HELD
-  http.end(); // End session immediately after getting data
-
-  if (err) {
-    ScopedRecursiveLock lock(displayMutex);
-    if (!lock.isLocked()) return;
-    dataConnectionOk = false;
-    resetRadarContacts();
-    updateDisplay();
-    return;
-  }
-  
   // --- Data processing into temporary variables (no lock held) ---
   AircraftInfo tempClosestAircraft;
   tempClosestAircraft.valid = false;
@@ -2013,149 +2043,187 @@ void fetchAircraft() {
   bool previousMatched[MAX_RADAR_CONTACTS] = {false};
   int newActiveIndex = -1;
 
-  // Main processing loop on the received JSON data
-  JsonArray arr = aircraftJsonDoc["aircraft"].as<JsonArray>();
-  for (JsonObject plane : arr) {
-    serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US / 2, true); // Opportunistic audio servicing without blocking
-    
-    if (!plane.containsKey("lat") || !plane.containsKey("lon")) continue;
-    double lat = plane["lat"].as<double>();
-    double lon = plane["lon"].as<double>();
-    double distance = haversine(USER_LAT, USER_LON, lat, lon);
-    if (isnan(distance) || isinf(distance) || distance > radarRangeKm) continue;
-    
-    tempAircraftCount++;
-    
-    double bearingToHome = calculateBearing(USER_LAT, USER_LON, lat, lon);
-    double groundSpeed = NAN;
-    double track = NAN;
-    double minutesToClosest = NAN;
-    bool inbound = false;
+  {
+    ScopedLock docLock(aircraftJsonMutex, portMAX_DELAY);
+    if (!docLock.isLocked()) {
+      http.end();
+      return;
+    }
 
-    if (distance <= alertRangeKm) {
+    DynamicJsonDocument *doc = ensureAircraftJsonDocumentLocked();
+    if (doc == nullptr) {
+      http.end();
+      ScopedRecursiveLock lock(displayMutex);
+      if (!lock.isLocked()) return;
+      dataConnectionOk = false;
+      resetRadarContacts();
+      updateDisplay();
+      return;
+    }
+
+    DeserializationError err = deserializeJson(*doc, http.getStream()); // CPU INTENSIVE - NO LOCK HELD
+    http.end(); // End session immediately after getting data
+
+    if (err) {
+      if (streamPlaying) {
+        purgeAircraftJsonDocumentLocked();
+      }
+      ScopedRecursiveLock lock(displayMutex);
+      if (!lock.isLocked()) return;
+      dataConnectionOk = false;
+      resetRadarContacts();
+      updateDisplay();
+      return;
+    }
+
+    // Main processing loop on the received JSON data
+    JsonArray arr = (*doc)["aircraft"].as<JsonArray>();
+    for (JsonObject plane : arr) {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US / 2, true); // Opportunistic audio servicing without blocking
+
+      if (!plane.containsKey("lat") || !plane.containsKey("lon")) continue;
+      double lat = plane["lat"].as<double>();
+      double lon = plane["lon"].as<double>();
+      double distance = haversine(USER_LAT, USER_LON, lat, lon);
+      if (isnan(distance) || isinf(distance) || distance > radarRangeKm) continue;
+
+      tempAircraftCount++;
+
+      double bearingToHome = calculateBearing(USER_LAT, USER_LON, lat, lon);
+      double groundSpeed = NAN;
+      double track = NAN;
+      double minutesToClosest = NAN;
+      bool inbound = false;
+
+      if (distance <= alertRangeKm) {
         inbound = true;
         minutesToClosest = 0.0;
-    }
-
-    if (plane.containsKey("gs")) {
-      JsonVariant speedVar = plane["gs"];
-      if (speedVar.is<float>() || speedVar.is<double>() || speedVar.is<int>()) {
-        groundSpeed = speedVar.as<double>();
       }
-    }
 
-    if (plane.containsKey("track")) {
-      JsonVariant trackVar = plane["track"];
-      if (trackVar.is<float>() || trackVar.is<double>() || trackVar.is<int>()) {
-        track = trackVar.as<double>();
+      if (plane.containsKey("gs")) {
+        JsonVariant speedVar = plane["gs"];
+        if (speedVar.is<float>() || speedVar.is<double>() || speedVar.is<int>()) {
+          groundSpeed = speedVar.as<double>();
+        }
       }
-    }
 
-    if (!inbound && !isnan(track) && !isnan(groundSpeed) && groundSpeed > 0) {
+      if (plane.containsKey("track")) {
+        JsonVariant trackVar = plane["track"];
+        if (trackVar.is<float>() || trackVar.is<double>() || trackVar.is<int>()) {
+          track = trackVar.as<double>();
+        }
+      }
+
+      if (!inbound && !isnan(track) && !isnan(groundSpeed) && groundSpeed > 0) {
         double toBase = fmod(bearingToHome + 180.0, 360.0);
         double angleDiff = fabs(track - toBase);
         if (angleDiff > 180.0) angleDiff = 360.0 - angleDiff;
         double crossTrack = distance * sin(deg2rad(angleDiff));
         double alongTrack = distance * cos(deg2rad(angleDiff));
         if (angleDiff < 90.0 && fabs(crossTrack) <= alertRangeKm && alongTrack >= 0) {
-            inbound = true;
-            double speedKmMin = groundSpeed * 1.852 / 60.0;
-            if (speedKmMin > 0) {
-                minutesToClosest = alongTrack / speedKmMin;
-            }
+          inbound = true;
+          double speedKmMin = groundSpeed * 1.852 / 60.0;
+          if (speedKmMin > 0) {
+            minutesToClosest = alongTrack / speedKmMin;
+          }
         }
-    }
+      }
 
-    if (inbound) {
+      if (inbound) {
         tempInboundCount++;
-    }
+      }
 
-    String flight;
-    if (plane.containsKey("flight")) {
+      String flight;
+      if (plane.containsKey("flight")) {
         const char *flightStr = plane["flight"].as<const char*>();
         if (flightStr) flight = String(flightStr);
         flight.trim();
-    }
-    
-    // --- RESTORED SQUAWK PARSING LOGIC ---
-    String squawk;
-    if (plane.containsKey("squawk")) {
-      JsonVariant sqVar = plane["squawk"];
-      if (sqVar.is<const char*>()) {
-        const char *sqStr = sqVar.as<const char*>();
-        if (sqStr != nullptr) {
-          squawk = String(sqStr);
-          squawk.trim();
-        }
-      } else if (sqVar.is<int>() || sqVar.is<long>() || sqVar.is<unsigned int>() || sqVar.is<unsigned long>()) {
-        long sqValue = sqVar.as<long>();
-        char buffer[8];
-        snprintf(buffer, sizeof(buffer), "%04ld", sqValue);
-        squawk = String(buffer);
       }
-    }
 
-    // --- RESTORED ALTITUDE PARSING LOGIC ---
-    int altitude = -1;
-    if (plane.containsKey("alt_baro")) {
-      JsonVariant alt = plane["alt_baro"];
-      if (alt.is<int>()) {
-        altitude = alt.as<int>();
-      } else if (alt.is<const char*>()) {
-        const char *altStr = alt.as<const char*>();
-        if (altStr != nullptr && strcmp(altStr, "ground") == 0) {
-          altitude = 0;
+      // --- RESTORED SQUAWK PARSING LOGIC ---
+      String squawk;
+      if (plane.containsKey("squawk")) {
+        JsonVariant sqVar = plane["squawk"];
+        if (sqVar.is<const char*>()) {
+          const char *sqStr = sqVar.as<const char*>();
+          if (sqStr != nullptr) {
+            squawk = String(sqStr);
+            squawk.trim();
+          }
+        } else if (sqVar.is<int>() || sqVar.is<long>() || sqVar.is<unsigned int>() || sqVar.is<unsigned long>()) {
+          long sqValue = sqVar.as<long>();
+          char buffer[8];
+          snprintf(buffer, sizeof(buffer), "%04ld", sqValue);
+          squawk = String(buffer);
         }
       }
-    }
-    
-    int matchIndex = -1;
-    // ... (Your original contact matching logic can be placed here if needed) ...
 
-    if (tempContactCount < MAX_RADAR_CONTACTS) {
-      RadarContact &contact = tempContacts[tempContactCount];
-      contact.valid = true;
-      contact.flight = flight;
-      contact.squawk = squawk;
-      contact.distanceKm = distance;
-      contact.bearing = bearingToHome;
-      contact.displayDistanceKm = distance;
-      contact.displayBearing = bearingToHome;
-      contact.altitude = altitude;
-      contact.groundSpeed = groundSpeed;
-      contact.track = track;
-      contact.displayTrack = track;
-      contact.inbound = inbound;
-      contact.minutesToClosest = minutesToClosest;
-      contact.stale = false;
-      contact.lastHighlightTime = 0;
-
-      if (matchIndex >= 0) {
-        contact.lastHighlightTime = previousContacts[matchIndex].lastHighlightTime;
-        contact.displayDistanceKm = previousContacts[matchIndex].displayDistanceKm;
-        contact.displayBearing = previousContacts[matchIndex].displayBearing;
-        contact.displayTrack = previousContacts[matchIndex].displayTrack;
-        previousMatched[matchIndex] = true;
+      // --- RESTORED ALTITUDE PARSING LOGIC ---
+      int altitude = -1;
+      if (plane.containsKey("alt_baro")) {
+        JsonVariant alt = plane["alt_baro"];
+        if (alt.is<int>()) {
+          altitude = alt.as<int>();
+        } else if (alt.is<const char*>()) {
+          const char *altStr = alt.as<const char*>();
+          if (altStr != nullptr && strcmp(altStr, "ground") == 0) {
+            altitude = 0;
+          }
+        }
       }
-      
-      if (!previousActiveFlight.isEmpty() && flight.length() > 0 && flight.equalsIgnoreCase(previousActiveFlight)) {
-        newActiveIndex = tempContactCount;
+
+      int matchIndex = -1;
+      // ... (Your original contact matching logic can be placed here if needed) ...
+
+      if (tempContactCount < MAX_RADAR_CONTACTS) {
+        RadarContact &contact = tempContacts[tempContactCount];
+        contact.valid = true;
+        contact.flight = flight;
+        contact.squawk = squawk;
+        contact.distanceKm = distance;
+        contact.bearing = bearingToHome;
+        contact.displayDistanceKm = distance;
+        contact.displayBearing = bearingToHome;
+        contact.altitude = altitude;
+        contact.groundSpeed = groundSpeed;
+        contact.track = track;
+        contact.displayTrack = track;
+        contact.inbound = inbound;
+        contact.minutesToClosest = minutesToClosest;
+        contact.stale = false;
+        contact.lastHighlightTime = 0;
+
+        if (matchIndex >= 0) {
+          contact.lastHighlightTime = previousContacts[matchIndex].lastHighlightTime;
+          contact.displayDistanceKm = previousContacts[matchIndex].displayDistanceKm;
+          contact.displayBearing = previousContacts[matchIndex].displayBearing;
+          contact.displayTrack = previousContacts[matchIndex].displayTrack;
+          previousMatched[matchIndex] = true;
+        }
+
+        if (!previousActiveFlight.isEmpty() && flight.length() > 0 && flight.equalsIgnoreCase(previousActiveFlight)) {
+          newActiveIndex = tempContactCount;
+        }
+        tempContactCount++;
       }
-      tempContactCount++;
+
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        tempClosestAircraft.valid = true;
+        tempClosestAircraft.flight = flight;
+        tempClosestAircraft.squawk = squawk;
+        tempClosestAircraft.distanceKm = distance;
+        tempClosestAircraft.bearing = bearingToHome;
+        tempClosestAircraft.altitude = altitude;
+        tempClosestAircraft.groundSpeed = groundSpeed;
+        tempClosestAircraft.track = track;
+        tempClosestAircraft.inbound = inbound;
+        tempClosestAircraft.minutesToClosest = minutesToClosest;
+      }
     }
 
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      tempClosestAircraft.valid = true;
-      tempClosestAircraft.flight = flight;
-      tempClosestAircraft.squawk = squawk;
-      tempClosestAircraft.distanceKm = distance;
-      tempClosestAircraft.bearing = bearingToHome;
-      tempClosestAircraft.altitude = altitude;
-      tempClosestAircraft.groundSpeed = groundSpeed;
-      tempClosestAircraft.track = track;
-      tempClosestAircraft.inbound = inbound;
-      tempClosestAircraft.minutesToClosest = minutesToClosest;
+    if (streamPlaying) {
+      purgeAircraftJsonDocumentLocked();
     }
   }
 
