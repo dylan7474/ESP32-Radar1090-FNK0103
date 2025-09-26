@@ -217,6 +217,7 @@ AudioOutputI2S *audioOutput = nullptr;
 bool amplifierEnabled = false;
 TaskHandle_t radarTaskHandle = nullptr;
 TaskHandle_t audioTaskHandle = nullptr;
+TaskHandle_t fetchTaskHandle = nullptr;
 volatile bool radarFrameRequested = false;
 volatile bool radarFrameReadyToPush = false;
 bool radarTaskStarted = false;
@@ -321,6 +322,8 @@ void drawButtons();
 void resetRadarContacts();
 void updateDisplay();
 void fetchAircraft();
+void requestAircraftFetch(bool immediate = false);
+void fetchTask(void *param);
 void initializeRangeIndices();
 void persistSettings();
 double currentRadarRangeKm();
@@ -421,6 +424,24 @@ void cycleAlertRange() {
   persistSettings();
 }
 
+void requestAircraftFetch(bool immediate) {
+  if (fetchTaskHandle != nullptr) {
+    if (immediate) {
+      xTaskNotifyGive(fetchTaskHandle);
+    }
+    return;
+  }
+
+  if (!immediate) {
+    unsigned long now = millis();
+    if (now - lastFetchTime < REFRESH_INTERVAL_MS) {
+      return;
+    }
+  }
+
+  fetchAircraft();
+}
+
 void handleRangeButton(ButtonType type) {
   if (type == BUTTON_RADAR_RANGE) {
     cycleRadarRange();
@@ -444,8 +465,7 @@ void handleRangeButton(ButtonType type) {
   aircraftCount = 0;
   inboundAircraftCount = 0;
   updateDisplay();
-  fetchAircraft();
-  lastFetchTime = millis();
+  requestAircraftFetch(true);
 }
 
 void setStreamStatus(const String &status) {
@@ -992,11 +1012,22 @@ void setup() {
     Serial.println("[STREAM] Failed to start audio service task; decoding will run on loop.");
   }
 
-  connectWiFi();
-  if (WiFi.status() == WL_CONNECTED) {
-    fetchAircraft();
-    lastFetchTime = millis();
+  BaseType_t fetchStatus = xTaskCreatePinnedToCore(
+      fetchTask,
+      "FetchTask",
+      7168,
+      nullptr,
+      0,
+      &fetchTaskHandle,
+      0);
+  if (fetchStatus == pdPASS) {
+    Serial.println("[NET] Aircraft fetch task started on core 0.");
+  } else {
+    fetchTaskHandle = nullptr;
+    Serial.println("[NET] Failed to start aircraft fetch task; polling will run on loop.");
   }
+
+  connectWiFi();
 }
 
 void loop() {
@@ -1010,9 +1041,10 @@ void loop() {
     wifiStatus = WiFi.status();
   }
 
-  if (now - lastFetchTime >= REFRESH_INTERVAL_MS) {
-    lastFetchTime = now;
-    fetchAircraft();
+  if (fetchTaskHandle == nullptr) {
+    if (now - lastFetchTime >= REFRESH_INTERVAL_MS) {
+      fetchAircraft();
+    }
   }
 
   if (wifiStatus != WL_CONNECTED && streamPlaying) {
@@ -1622,6 +1654,36 @@ void audioTask(void *param) {
   }
 }
 
+void fetchTask(void *param) {
+  for (;;) {
+    unsigned long now = millis();
+    unsigned long waitMs = 0;
+    if (lastFetchTime != 0) {
+      unsigned long sinceLast = now - lastFetchTime;
+      if (sinceLast < REFRESH_INTERVAL_MS) {
+        waitMs = REFRESH_INTERVAL_MS - sinceLast;
+      }
+    }
+
+    BaseType_t notified = 0;
+    if (waitMs > 0) {
+      notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
+    } else {
+      notified = ulTaskNotifyTake(pdTRUE, 0);
+    }
+
+    if (notified == 0 && waitMs > 0) {
+      unsigned long afterWait = millis();
+      if (afterWait - lastFetchTime < REFRESH_INTERVAL_MS) {
+        continue;
+      }
+    }
+
+    fetchAircraft();
+    taskYIELD();
+  }
+}
+
 void renderRadarFrame(bool pushToDisplay) {
   ScopedRecursiveLock lock(displayMutex);
   uint32_t frameSerial = ++radarFrameSerial;
@@ -1871,6 +1933,7 @@ void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("WiFi connected.");
     WiFi.setSleep(false);
+    requestAircraftFetch(true);
   } else {
     Serial.println("WiFi connection failed.");
   }
@@ -1879,6 +1942,8 @@ void connectWiFi() {
 }
 
 void fetchAircraft() {
+  lastFetchTime = millis();
+
   if (WiFi.status() != WL_CONNECTED) {
     dataConnectionOk = false;
     closestAircraft.valid = false;
@@ -1913,13 +1978,16 @@ void fetchAircraft() {
   }
 
   http.setTimeout(4000);
+  taskYIELD();
   serviceAudioDecoder();
   int httpCode = http.GET();
   serviceAudioDecoder();
+  taskYIELD();
 
   if (httpCode == HTTP_CODE_OK) {
     DynamicJsonDocument doc(16384);
     DeserializationError err = deserializeJson(doc, http.getStream());
+    taskYIELD();
     if (!err) {
       dataConnectionOk = true;
       JsonArray arr = doc["aircraft"].as<JsonArray>();
@@ -1939,14 +2007,21 @@ void fetchAircraft() {
       for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
         previousContacts[i] = radarContacts[i];
         previousMatched[i] = false;
+        if ((i & 7) == 0) {
+          taskYIELD();
+        }
       }
 
       aircraftCount = 0;
       resetRadarContacts();
       int localInboundCount = 0;
 
+      int planeIndex = 0;
       for (JsonObject plane : arr) {
         serviceAudioDecoder();
+        if ((planeIndex++ & 3) == 0) {
+          taskYIELD();
+        }
         if (!plane.containsKey("lat") || !plane.containsKey("lon")) {
           continue;
         }
@@ -2067,6 +2142,9 @@ void fetchAircraft() {
                 matchIndex = j;
                 break;
               }
+              if ((j & 3) == 0) {
+                taskYIELD();
+              }
             }
           }
 
@@ -2080,6 +2158,9 @@ void fetchAircraft() {
               if (distanceDiff <= 1.0 && bearingDiff <= 12.0) {
                 matchIndex = j;
                 break;
+              }
+              if ((j & 3) == 0) {
+                taskYIELD();
               }
             }
           }
@@ -2147,6 +2228,9 @@ void fetchAircraft() {
         contact.stale = true;
         if (i == previousActiveIndex && contact.lastHighlightTime != 0) {
           setActiveContact(radarContactCount - 1);
+        }
+        if ((i & 3) == 0) {
+          taskYIELD();
         }
       }
 
