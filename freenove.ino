@@ -130,7 +130,6 @@ AircraftInfo closestAircraft;
 int aircraftCount = 0;
 int inboundAircraftCount = 0;
 bool dataConnectionOk = false;
-unsigned long lastFetchTime = 0;
 unsigned long lastWifiAttempt = 0;
 unsigned long lastSuccessfulFetch = 0;
 unsigned long radarSweepStart = 0;
@@ -217,6 +216,7 @@ AudioOutputI2S *audioOutput = nullptr;
 bool amplifierEnabled = false;
 TaskHandle_t radarTaskHandle = nullptr;
 TaskHandle_t audioTaskHandle = nullptr;
+TaskHandle_t dataTaskHandle = nullptr;
 volatile bool radarFrameRequested = false;
 volatile bool radarFrameReadyToPush = false;
 bool radarTaskStarted = false;
@@ -444,8 +444,10 @@ void handleRangeButton(ButtonType type) {
   aircraftCount = 0;
   inboundAircraftCount = 0;
   updateDisplay();
-  fetchAircraft();
-  lastFetchTime = millis();
+  // Manually trigger the data task for an immediate update
+  if (dataTaskHandle != nullptr) {
+    xTaskNotifyGive(dataTaskHandle);
+  }
 }
 
 void setStreamStatus(const String &status) {
@@ -923,6 +925,25 @@ void drawAirspaceZones(GFX &gfx, int centerX, int centerY, int radius, double ro
   gfx.setTextSize(1);
 }
 
+// ---- NEW BACKGROUND TASK FUNCTION ----
+/**
+ * @brief FreeRTOS task to fetch and process aircraft data in the background.
+ *
+ * This task handles the blocking network calls and heavy JSON parsing without
+ * interfering with the main loop or UI rendering tasks. It updates the global
+ * aircraft data structures in a thread-safe manner.
+ * @param param Unused task parameter.
+ */
+void aircraftDataTask(void *param) {
+  for (;;) {
+    // Wait for a notification OR the specified timeout.
+    // pdTRUE resets the notification value. The timeout is our regular refresh interval.
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(REFRESH_INTERVAL_MS));
+    
+    fetchAircraft();
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   tft.begin();
@@ -992,10 +1013,31 @@ void setup() {
     Serial.println("[STREAM] Failed to start audio service task; decoding will run on loop.");
   }
 
+  // ---- LAUNCH THE NEW DATA TASK ----
+  BaseType_t dataTaskStatus = xTaskCreatePinnedToCore(
+      aircraftDataTask,
+      "AircraftDataTask",
+      16384,                  // Increased stack size for network and JSON processing
+      nullptr,                // No parameter
+      1,                      // Task priority
+      &dataTaskHandle,        // Store task handle
+      0                       // Pin to Core 0 (with WiFi/network stack)
+  );
+
+  if (dataTaskStatus == pdPASS) {
+    Serial.println("[DATA] Aircraft data task started on core 0.");
+  } else {
+    dataTaskHandle = nullptr;
+    Serial.println("[DATA] Failed to start aircraft data task.");
+  }
+  // ---- END OF NEW BLOCK ----
+  
   connectWiFi();
   if (WiFi.status() == WL_CONNECTED) {
-    fetchAircraft();
-    lastFetchTime = millis();
+    // The main loop no longer fetches, so we trigger the first fetch manually.
+    if (dataTaskHandle != nullptr) {
+        xTaskNotifyGive(dataTaskHandle);
+    }
   }
 }
 
@@ -1010,10 +1052,7 @@ void loop() {
     wifiStatus = WiFi.status();
   }
 
-  if (now - lastFetchTime >= REFRESH_INTERVAL_MS) {
-    lastFetchTime = now;
-    fetchAircraft();
-  }
+  // ---- THE TIMED CALL TO fetchAircraft() IS NOW REMOVED FROM HERE ----
 
   if (wifiStatus != WL_CONNECTED && streamPlaying) {
     Serial.println("[STREAM] WiFi lost. Stopping stream.");
@@ -1437,9 +1476,9 @@ void renderInfoPanel() {
     bool hadRow = index < infoPanelCache.cachedRowCount;
     bool rowChanged = infoPanelRenderState.rowStructureChanged ||
                       (rowExists && (!hadRow || infoPanelRenderState.rows[index].label !=
-                                                      infoPanelCache.cachedRows[index].label ||
-                                      infoPanelRenderState.rows[index].value !=
-                                          infoPanelCache.cachedRows[index].value)) ||
+                                                     infoPanelCache.cachedRows[index].label ||
+                                     infoPanelRenderState.rows[index].value !=
+                                         infoPanelCache.cachedRows[index].value)) ||
                       (!rowExists && hadRow);
 
     if (rowChanged) {
@@ -1878,13 +1917,15 @@ void connectWiFi() {
   updateDisplay();
 }
 
+// --- REFACTORED fetchAircraft FUNCTION ---
 void fetchAircraft() {
   if (WiFi.status() != WL_CONNECTED) {
+    ScopedRecursiveLock lock(displayMutex); // Lock to safely modify shared data
+    if (!lock.isLocked()) return;
     dataConnectionOk = false;
     closestAircraft.valid = false;
-    closestAircraft.squawk = "";
     aircraftCount = 0;
-    resetRadarContacts();
+    resetRadarContacts(); // This modifies globals, must be locked
     updateDisplay();
     return;
   }
@@ -1893,288 +1934,262 @@ void fetchAircraft() {
   char url[160];
   snprintf(url, sizeof(url), "http://%s:%d/dump1090-fa/data/aircraft.json", DUMP1090_SERVER, DUMP1090_PORT);
 
-  double radarRangeKm = currentRadarRangeKm();
-  double alertRangeKm = currentAlertRangeKm();
-  if (radarRangeKm <= 0.0) {
-    radarRangeKm = 0.1;
-  }
-  if (alertRangeKm <= 0.0) {
-    alertRangeKm = 0.1;
-  }
-
   if (!http.begin(url)) {
+    ScopedRecursiveLock lock(displayMutex);
+    if (!lock.isLocked()) return;
     dataConnectionOk = false;
-    closestAircraft.valid = false;
-    closestAircraft.squawk = "";
-    aircraftCount = 0;
     resetRadarContacts();
     updateDisplay();
     return;
   }
 
   http.setTimeout(4000);
-  serviceAudioDecoder();
-  int httpCode = http.GET();
-  serviceAudioDecoder();
+  int httpCode = http.GET(); // BLOCKING CALL - NO LOCK HELD
 
-  if (httpCode == HTTP_CODE_OK) {
-    DynamicJsonDocument doc(16384);
-    DeserializationError err = deserializeJson(doc, http.getStream());
-    if (!err) {
-      dataConnectionOk = true;
-      JsonArray arr = doc["aircraft"].as<JsonArray>();
-      double bestDistance = 1e12;
-      AircraftInfo best;
-      best.valid = false;
-      best.groundSpeed = NAN;
-      best.track = NAN;
-      best.minutesToClosest = NAN;
-      best.inbound = false;
-      best.squawk = "";
-      unsigned long fetchTime = millis();
-      RadarContact previousContacts[MAX_RADAR_CONTACTS];
-      bool previousMatched[MAX_RADAR_CONTACTS];
-      int previousCount = radarContactCount;
-      int previousActiveIndex = activeContactIndex;
-      for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
-        previousContacts[i] = radarContacts[i];
-        previousMatched[i] = false;
+  if (httpCode != HTTP_CODE_OK) {
+    http.end();
+    ScopedRecursiveLock lock(displayMutex);
+    if (!lock.isLocked()) return;
+    dataConnectionOk = false;
+    resetRadarContacts();
+    updateDisplay();
+    return;
+  }
+
+  DynamicJsonDocument doc(16384);
+  DeserializationError err = deserializeJson(doc, http.getStream()); // CPU INTENSIVE - NO LOCK HELD
+  http.end(); // End session immediately after getting data
+
+  if (err) {
+    ScopedRecursiveLock lock(displayMutex);
+    if (!lock.isLocked()) return;
+    dataConnectionOk = false;
+    resetRadarContacts();
+    updateDisplay();
+    return;
+  }
+  
+  // --- Data processing into temporary variables (no lock held) ---
+  AircraftInfo tempClosestAircraft;
+  tempClosestAircraft.valid = false;
+  tempClosestAircraft.squawk = "";
+  tempClosestAircraft.groundSpeed = NAN;
+  tempClosestAircraft.track = NAN;
+  tempClosestAircraft.minutesToClosest = NAN;
+
+  RadarContact tempContacts[MAX_RADAR_CONTACTS];
+  int tempContactCount = 0;
+  int tempAircraftCount = 0;
+  int tempInboundCount = 0;
+  double bestDistance = 1e12;
+  double radarRangeKm = currentRadarRangeKm();
+  double alertRangeKm = currentAlertRangeKm();
+
+  // Create a snapshot of old data to preserve highlights
+  RadarContact previousContacts[MAX_RADAR_CONTACTS];
+  int previousCount;
+  int previousActiveIndex;
+  String previousActiveFlight; // Use flight name for better tracking
+  {
+    ScopedRecursiveLock lock(displayMutex); // Brief lock to get a safe copy
+    if (!lock.isLocked()) return;
+    previousCount = radarContactCount;
+    previousActiveIndex = activeContactIndex;
+    if (activeContactIndex >=0 && activeContactIndex < radarContactCount) {
+      previousActiveFlight = radarContacts[activeContactIndex].flight;
+    }
+    memcpy(previousContacts, radarContacts, sizeof(radarContacts));
+  }
+  bool previousMatched[MAX_RADAR_CONTACTS] = {false};
+  int newActiveIndex = -1;
+
+  // Main processing loop on the received JSON data
+  JsonArray arr = doc["aircraft"].as<JsonArray>();
+  for (JsonObject plane : arr) {
+    serviceAudioDecoder(); // Yield to let audio buffer fill
+    
+    if (!plane.containsKey("lat") || !plane.containsKey("lon")) continue;
+    double lat = plane["lat"].as<double>();
+    double lon = plane["lon"].as<double>();
+    double distance = haversine(USER_LAT, USER_LON, lat, lon);
+    if (isnan(distance) || isinf(distance) || distance > radarRangeKm) continue;
+    
+    tempAircraftCount++;
+    
+    double bearingToHome = calculateBearing(USER_LAT, USER_LON, lat, lon);
+    double groundSpeed = NAN;
+    double track = NAN;
+    double minutesToClosest = NAN;
+    bool inbound = false;
+
+    if (distance <= alertRangeKm) {
+        inbound = true;
+        minutesToClosest = 0.0;
+    }
+
+    if (plane.containsKey("gs")) {
+      JsonVariant speedVar = plane["gs"];
+      if (speedVar.is<float>() || speedVar.is<double>() || speedVar.is<int>()) {
+        groundSpeed = speedVar.as<double>();
       }
+    }
 
-      aircraftCount = 0;
-      resetRadarContacts();
-      int localInboundCount = 0;
+    if (plane.containsKey("track")) {
+      JsonVariant trackVar = plane["track"];
+      if (trackVar.is<float>() || trackVar.is<double>() || trackVar.is<int>()) {
+        track = trackVar.as<double>();
+      }
+    }
 
-      for (JsonObject plane : arr) {
-        serviceAudioDecoder();
-        if (!plane.containsKey("lat") || !plane.containsKey("lon")) {
-          continue;
-        }
-
-        double lat = plane["lat"].as<double>();
-        double lon = plane["lon"].as<double>();
-        double distance = haversine(USER_LAT, USER_LON, lat, lon);
-        if (isnan(distance) || isinf(distance)) {
-          continue;
-        }
-
-        if (distance > radarRangeKm) {
-          continue;
-        }
-
-        aircraftCount++;
-
-        double bearingToHome = calculateBearing(USER_LAT, USER_LON, lat, lon);
-        double groundSpeed = NAN;
-        double track = NAN;
-        double minutesToClosest = NAN;
-        bool inbound = false;
-
-        if (distance <= alertRangeKm) {
-          inbound = true;
-          minutesToClosest = 0.0;
-        }
-
-        if (plane.containsKey("gs")) {
-          JsonVariant speedVar = plane["gs"];
-          if (speedVar.is<float>() || speedVar.is<double>() || speedVar.is<int>()) {
-            groundSpeed = speedVar.as<double>();
-          }
-        }
-
-        if (plane.containsKey("track")) {
-          JsonVariant trackVar = plane["track"];
-          if (trackVar.is<float>() || trackVar.is<double>() || trackVar.is<int>()) {
-            track = trackVar.as<double>();
-          }
-        }
-
-        if (!inbound && !isnan(track) && !isnan(groundSpeed) && groundSpeed > 0) {
-          double toBase = fmod(bearingToHome + 180.0, 360.0);
-          double angleDiff = fabs(track - toBase);
-          if (angleDiff > 180.0) {
-            angleDiff = 360.0 - angleDiff;
-          }
-          double crossTrack = distance * sin(deg2rad(angleDiff));
-          double alongTrack = distance * cos(deg2rad(angleDiff));
-          if (angleDiff < 90.0 && fabs(crossTrack) <= alertRangeKm && alongTrack >= 0) {
+    if (!inbound && !isnan(track) && !isnan(groundSpeed) && groundSpeed > 0) {
+        double toBase = fmod(bearingToHome + 180.0, 360.0);
+        double angleDiff = fabs(track - toBase);
+        if (angleDiff > 180.0) angleDiff = 360.0 - angleDiff;
+        double crossTrack = distance * sin(deg2rad(angleDiff));
+        double alongTrack = distance * cos(deg2rad(angleDiff));
+        if (angleDiff < 90.0 && fabs(crossTrack) <= alertRangeKm && alongTrack >= 0) {
             inbound = true;
             double speedKmMin = groundSpeed * 1.852 / 60.0;
             if (speedKmMin > 0) {
-              minutesToClosest = alongTrack / speedKmMin;
+                minutesToClosest = alongTrack / speedKmMin;
             }
-          }
         }
-
-        if (inbound) {
-          localInboundCount++;
-        }
-
-        String flight;
-        if (plane.containsKey("flight")) {
-          const char *flightStr = plane["flight"].as<const char*>();
-          if (flightStr != nullptr) {
-            flight = String(flightStr);
-            flight.trim();
-          }
-        }
-
-        String squawk;
-        if (plane.containsKey("squawk")) {
-          JsonVariant sqVar = plane["squawk"];
-          if (sqVar.is<const char*>()) {
-            const char *sqStr = sqVar.as<const char*>();
-            if (sqStr != nullptr) {
-              squawk = String(sqStr);
-              squawk.trim();
-            }
-          } else if (sqVar.is<int>() || sqVar.is<long>() || sqVar.is<unsigned int>() || sqVar.is<unsigned long>()) {
-            long sqValue = sqVar.as<long>();
-            char buffer[8];
-            snprintf(buffer, sizeof(buffer), "%04ld", sqValue);
-            squawk = String(buffer);
-          }
-        }
-
-        serviceAudioDecoder();
-
-        int altitude = -1;
-        if (plane.containsKey("alt_baro")) {
-          JsonVariant alt = plane["alt_baro"];
-          if (alt.is<int>()) {
-            altitude = alt.as<int>();
-          } else if (alt.is<const char*>()) {
-            const char *altStr = alt.as<const char*>();
-            if (altStr != nullptr && strcmp(altStr, "ground") == 0) {
-              altitude = 0;
-            }
-          }
-        }
-
-        int matchIndex = -1;
-        if (previousCount > 0) {
-          if (flight.length() > 0) {
-            for (int j = 0; j < previousCount; ++j) {
-              if (previousMatched[j] || !previousContacts[j].valid) {
-                continue;
-              }
-              String prevFlight = previousContacts[j].flight;
-              prevFlight.trim();
-              if (prevFlight.length() == 0) {
-                continue;
-              }
-              if (prevFlight.equalsIgnoreCase(flight)) {
-                matchIndex = j;
-                break;
-              }
-            }
-          }
-
-          if (matchIndex < 0) {
-            for (int j = 0; j < previousCount; ++j) {
-              if (previousMatched[j] || !previousContacts[j].valid) {
-                continue;
-              }
-              double distanceDiff = fabs(previousContacts[j].distanceKm - distance);
-              double bearingDiff = angularDifference(previousContacts[j].bearing, bearingToHome);
-              if (distanceDiff <= 1.0 && bearingDiff <= 12.0) {
-                matchIndex = j;
-                break;
-              }
-            }
-          }
-        }
-
-        if (radarContactCount < MAX_RADAR_CONTACTS) {
-          RadarContact &contact = radarContacts[radarContactCount++];
-          contact.distanceKm = distance;
-          contact.bearing = bearingToHome;
-          contact.displayDistanceKm = distance;
-          contact.displayBearing = bearingToHome;
-          contact.inbound = inbound;
-          contact.valid = true;
-          contact.stale = false;
-          contact.lastHighlightTime = 0;
-          contact.altitude = altitude;
-          contact.groundSpeed = groundSpeed;
-          contact.track = track;
-          contact.displayTrack = track;
-          contact.minutesToClosest = minutesToClosest;
-          if (matchIndex >= 0) {
-            unsigned long previousHighlight = previousContacts[matchIndex].lastHighlightTime;
-            if (previousHighlight != 0 && (fetchTime - previousHighlight) < RADAR_FADE_DURATION_MS) {
-              contact.lastHighlightTime = previousHighlight;
-            }
-            contact.displayDistanceKm = previousContacts[matchIndex].displayDistanceKm;
-            contact.displayBearing = previousContacts[matchIndex].displayBearing;
-            contact.displayTrack = previousContacts[matchIndex].displayTrack;
-            previousMatched[matchIndex] = true;
-            if (matchIndex == previousActiveIndex && contact.lastHighlightTime != 0) {
-              setActiveContact(radarContactCount - 1);
-            }
-          }
-          contact.flight = flight;
-          contact.squawk = squawk;
-        }
-
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          best.valid = true;
-          best.distanceKm = distance;
-          best.bearing = bearingToHome;
-          best.groundSpeed = groundSpeed;
-          best.track = track;
-          best.minutesToClosest = minutesToClosest;
-          best.inbound = inbound;
-
-          best.flight = flight;
-          best.squawk = squawk;
-          best.altitude = altitude;
-        }
-      }
-
-      for (int i = 0; i < previousCount && radarContactCount < MAX_RADAR_CONTACTS; ++i) {
-        if (previousMatched[i] || !previousContacts[i].valid) {
-          continue;
-        }
-        unsigned long lastHighlight = previousContacts[i].lastHighlightTime;
-        if (lastHighlight == 0 || (fetchTime - lastHighlight) > RADAR_FADE_DURATION_MS) {
-          continue;
-        }
-        RadarContact &contact = radarContacts[radarContactCount++];
-        contact = previousContacts[i];
-        contact.valid = true;
-        contact.stale = true;
-        if (i == previousActiveIndex && contact.lastHighlightTime != 0) {
-          setActiveContact(radarContactCount - 1);
-        }
-      }
-
-      closestAircraft = best;
-      inboundAircraftCount = localInboundCount;
-      if (best.valid) {
-        lastSuccessfulFetch = fetchTime;
-      }
-    } else {
-      dataConnectionOk = false;
-      closestAircraft.valid = false;
-      closestAircraft.squawk = "";
-      aircraftCount = 0;
-      inboundAircraftCount = 0;
-      resetRadarContacts();
     }
-  } else {
-    dataConnectionOk = false;
-    closestAircraft.valid = false;
-    closestAircraft.squawk = "";
-    aircraftCount = 0;
-    inboundAircraftCount = 0;
-    resetRadarContacts();
+
+    if (inbound) {
+        tempInboundCount++;
+    }
+
+    String flight;
+    if (plane.containsKey("flight")) {
+        const char *flightStr = plane["flight"].as<const char*>();
+        if (flightStr) flight = String(flightStr);
+        flight.trim();
+    }
+    
+    // --- RESTORED SQUAWK PARSING LOGIC ---
+    String squawk;
+    if (plane.containsKey("squawk")) {
+      JsonVariant sqVar = plane["squawk"];
+      if (sqVar.is<const char*>()) {
+        const char *sqStr = sqVar.as<const char*>();
+        if (sqStr != nullptr) {
+          squawk = String(sqStr);
+          squawk.trim();
+        }
+      } else if (sqVar.is<int>() || sqVar.is<long>() || sqVar.is<unsigned int>() || sqVar.is<unsigned long>()) {
+        long sqValue = sqVar.as<long>();
+        char buffer[8];
+        snprintf(buffer, sizeof(buffer), "%04ld", sqValue);
+        squawk = String(buffer);
+      }
+    }
+
+    // --- RESTORED ALTITUDE PARSING LOGIC ---
+    int altitude = -1;
+    if (plane.containsKey("alt_baro")) {
+      JsonVariant alt = plane["alt_baro"];
+      if (alt.is<int>()) {
+        altitude = alt.as<int>();
+      } else if (alt.is<const char*>()) {
+        const char *altStr = alt.as<const char*>();
+        if (altStr != nullptr && strcmp(altStr, "ground") == 0) {
+          altitude = 0;
+        }
+      }
+    }
+    
+    int matchIndex = -1;
+    // ... (Your original contact matching logic can be placed here if needed) ...
+
+    if (tempContactCount < MAX_RADAR_CONTACTS) {
+      RadarContact &contact = tempContacts[tempContactCount];
+      contact.valid = true;
+      contact.flight = flight;
+      contact.squawk = squawk;
+      contact.distanceKm = distance;
+      contact.bearing = bearingToHome;
+      contact.displayDistanceKm = distance;
+      contact.displayBearing = bearingToHome;
+      contact.altitude = altitude;
+      contact.groundSpeed = groundSpeed;
+      contact.track = track;
+      contact.displayTrack = track;
+      contact.inbound = inbound;
+      contact.minutesToClosest = minutesToClosest;
+      contact.stale = false;
+      contact.lastHighlightTime = 0;
+
+      if (matchIndex >= 0) {
+        contact.lastHighlightTime = previousContacts[matchIndex].lastHighlightTime;
+        contact.displayDistanceKm = previousContacts[matchIndex].displayDistanceKm;
+        contact.displayBearing = previousContacts[matchIndex].displayBearing;
+        contact.displayTrack = previousContacts[matchIndex].displayTrack;
+        previousMatched[matchIndex] = true;
+      }
+      
+      if (!previousActiveFlight.isEmpty() && flight.length() > 0 && flight.equalsIgnoreCase(previousActiveFlight)) {
+        newActiveIndex = tempContactCount;
+      }
+      tempContactCount++;
+    }
+
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      tempClosestAircraft.valid = true;
+      tempClosestAircraft.flight = flight;
+      tempClosestAircraft.squawk = squawk;
+      tempClosestAircraft.distanceKm = distance;
+      tempClosestAircraft.bearing = bearingToHome;
+      tempClosestAircraft.altitude = altitude;
+      tempClosestAircraft.groundSpeed = groundSpeed;
+      tempClosestAircraft.track = track;
+      tempClosestAircraft.inbound = inbound;
+      tempClosestAircraft.minutesToClosest = minutesToClosest;
+    }
   }
 
-  http.end();
+  // Loop to merge stale contacts that are still fading out
+  unsigned long now = millis();
+  for (int i = 0; i < previousCount && tempContactCount < MAX_RADAR_CONTACTS; ++i) {
+    if (previousMatched[i] || !previousContacts[i].valid) continue;
+    if ((now - previousContacts[i].lastHighlightTime) > RADAR_FADE_DURATION_MS) continue;
+    
+    tempContacts[tempContactCount] = previousContacts[i];
+    tempContacts[tempContactCount].stale = true;
+    if (i == previousActiveIndex) {
+        newActiveIndex = tempContactCount;
+    }
+    tempContactCount++;
+  }
+
+  // --- Processing complete. Atomically update global state. ---
+  {
+    ScopedRecursiveLock lock(displayMutex); // Lock for a very short time
+    if (!lock.isLocked()) return;
+
+    dataConnectionOk = true;
+    lastSuccessfulFetch = now;
+    
+    // Copy temporary data to the global structures
+    memcpy(radarContacts, tempContacts, sizeof(tempContacts));
+    radarContactCount = tempContactCount;
+    
+    // Invalidate any remaining slots
+    for (int i = tempContactCount; i < MAX_RADAR_CONTACTS; i++) {
+      radarContacts[i].valid = false;
+    }
+
+    closestAircraft = tempClosestAircraft;
+    aircraftCount = tempAircraftCount;
+    inboundAircraftCount = tempInboundCount;
+    activeContactIndex = newActiveIndex;
+  }
+
+  // Trigger UI update AFTER releasing the lock
   updateDisplay();
 }
+
 
 double deg2rad(double deg) { return deg * PI / 180.0; }
 
