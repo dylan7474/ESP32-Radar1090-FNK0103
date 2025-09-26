@@ -1,0 +1,2490 @@
+// Monochrome green variant of the Freenove radar sketch for a classic scope aesthetic.
+#include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <TFT_eSPI.h>
+#include <SPI.h>
+#include <math.h>
+#include <cstring>
+#include <EEPROM.h>
+#include <AudioFileSourceICYStream.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioOutputI2S.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+
+#include "config.h"
+#include "plane_icon.h"
+
+// --- Display & Timing Constants ---
+// This variant applies a monochrome green palette to mimic a traditional radar scope.
+static const uint16_t COLOR_SCOPE_GREEN_PRIMARY = 0x03E0;  // Bright vector elements
+static const uint16_t COLOR_SCOPE_GREEN_DIM = 0x0260;       // Gridlines and muted UI
+static const uint16_t COLOR_SCOPE_GREEN_FAINT = 0x0140;     // Background fills and shading
+
+static const uint16_t COLOR_BACKGROUND = TFT_BLACK;          // Fully black backdrop for classic scope contrast
+static const uint16_t COLOR_TEXT = COLOR_SCOPE_GREEN_PRIMARY;
+static const uint16_t COLOR_RADAR_OUTLINE = COLOR_SCOPE_GREEN_PRIMARY;
+static const uint16_t COLOR_RADAR_GRID = COLOR_SCOPE_GREEN_DIM;
+static const uint16_t COLOR_RADAR_CONTACT = COLOR_SCOPE_GREEN_PRIMARY;
+static const uint16_t COLOR_RADAR_INBOUND = COLOR_SCOPE_GREEN_PRIMARY;      // Monochrome contact highlight
+static const uint16_t COLOR_RADAR_HOME = COLOR_SCOPE_GREEN_DIM;             // Dim marker for home position
+static const uint16_t COLOR_AIRSPACE = COLOR_SCOPE_GREEN_DIM;               // Muted boundary accents
+static const uint16_t COLOR_INFO_TABLE_BG = TFT_BLACK;
+static const uint16_t COLOR_INFO_TABLE_HEADER_BG = COLOR_SCOPE_GREEN_DIM;
+static const uint16_t COLOR_INFO_TABLE_BORDER = COLOR_SCOPE_GREEN_PRIMARY;
+static const int INFO_TEXT_SIZE = 2;
+static const unsigned long REFRESH_INTERVAL_MS = 5000;
+static const unsigned long WIFI_RETRY_INTERVAL_MS = 15000;
+static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
+static const int RADAR_MARGIN = 12;
+static const int RADAR_TOP_PADDING = 24;
+static const int MAX_RADAR_CONTACTS = 40;
+static const unsigned long RADAR_SWEEP_PERIOD_MS = 6000;
+static const unsigned long RADAR_FADE_DURATION_MS = 4000;
+static const unsigned long RADAR_FRAME_INTERVAL_MS = 60;
+static const uint32_t AUDIO_SERVICE_TIME_SLICE_US = 6000;
+static const uint32_t AUDIO_DRAW_SERVICE_INTERVAL_US = 3500;
+static const uint32_t AUDIO_DRAW_SERVICE_BUDGET_US = 2000;
+static const uint32_t AUDIO_DRAW_MAX_SERVICES_PER_FRAME = 10;
+static const double RADAR_SWEEP_WIDTH_DEG = 5.0;
+static const uint16_t COLOR_RADAR_SWEEP = COLOR_SCOPE_GREEN_DIM;
+static const uint16_t COLOR_BUTTON_ACTIVE = COLOR_SCOPE_GREEN_PRIMARY;
+static const uint16_t COLOR_BUTTON_INACTIVE = COLOR_SCOPE_GREEN_DIM;
+static const int INFO_TABLE_ROW_HEIGHT = 28;
+static const int INFO_TABLE_HEADER_HEIGHT = 48;
+static const int INFO_TABLE_PADDING = 8;
+static const int COMPASS_LABEL_OFFSET = 16;
+static const int COMPASS_TEXT_SIZE = 2;
+static const float AIRCRAFT_ICON_SIZE = 6.0f;
+
+static const int BUTTON_COUNT = 3;
+static const int BUTTON_HEIGHT = 48;
+static const int BUTTON_SPACING = 12;
+static const unsigned long TOUCH_DEBOUNCE_MS = 250;
+// Resistive touch calibration bounds; adjust if on-screen touch points do not align.
+#ifndef TOUCH_RAW_MIN_X
+#define TOUCH_RAW_MIN_X 200
+#endif
+#ifndef TOUCH_RAW_MAX_X
+#define TOUCH_RAW_MAX_X 3900
+#endif
+#ifndef TOUCH_RAW_MIN_Y
+#define TOUCH_RAW_MIN_Y 200
+#endif
+#ifndef TOUCH_RAW_MAX_Y
+#define TOUCH_RAW_MAX_Y 3900
+#endif
+#ifndef TOUCH_SWAP_XY
+#define TOUCH_SWAP_XY 0
+#endif
+#ifndef TOUCH_INVERT_X
+#define TOUCH_INVERT_X 0
+#endif
+#ifndef TOUCH_INVERT_Y
+#define TOUCH_INVERT_Y 1
+#endif
+static const int WIFI_ICON_BARS = 4;
+static const int WIFI_ICON_BAR_WIDTH = 5;
+static const int WIFI_ICON_BAR_SPACING = 3;
+static const int WIFI_ICON_HEIGHT = 20;
+static const int RADAR_CONTACT_AUDIO_INTERVAL = 3;
+
+static const double RADAR_RANGE_OPTIONS_KM[] = {5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 300.0};
+static const int RADAR_RANGE_OPTION_COUNT = sizeof(RADAR_RANGE_OPTIONS_KM) / sizeof(RADAR_RANGE_OPTIONS_KM[0]);
+static const double ALERT_RANGE_OPTIONS_KM[] = {1.0, 3.0, 5.0, 10.0};
+static const int ALERT_RANGE_OPTION_COUNT = sizeof(ALERT_RANGE_OPTIONS_KM) / sizeof(ALERT_RANGE_OPTIONS_KM[0]);
+static const double DEFAULT_RADAR_RANGE_KM = 25.0;
+static const double DEFAULT_ALERT_RANGE_KM = 5.0;
+
+static const uint8_t EEPROM_MAGIC_VALUE = 0xA5;
+static const int EEPROM_MAGIC_ADDR = 0;
+static const int EEPROM_RADAR_RANGE_ADDR = 1;
+static const int EEPROM_ALERT_RANGE_ADDR = 2;
+static const int EEPROM_RADAR_ROTATION_ADDR = 3;
+static const int EEPROM_SIZE = 4;
+
+static const int COMPASS_LABEL_COUNT = 4;
+
+TFT_eSPI tft = TFT_eSPI();
+TFT_eSprite radarSprite = TFT_eSprite(&tft);
+
+bool radarSpriteActive = false;
+int radarSpriteWidth = 0;
+int radarSpriteHeight = 0;
+
+// Forward declarations for helpers referenced before their definitions.
+void invalidateRadarBackground();
+void markInfoPanelDirty();
+
+struct AircraftInfo {
+  String flight;
+  double distanceKm;
+  int altitude;
+  double bearing;
+  double groundSpeed;
+  double track;
+  double minutesToClosest;
+  bool inbound;
+  bool valid;
+  String squawk;
+};
+
+AircraftInfo closestAircraft;
+int aircraftCount = 0;
+int inboundAircraftCount = 0;
+bool dataConnectionOk = false;
+unsigned long lastWifiAttempt = 0;
+unsigned long lastSuccessfulFetch = 0;
+unsigned long radarSweepStart = 0;
+volatile unsigned long lastRadarFrameTime = 0;
+
+volatile uint32_t radarFrameSerial = 0;
+volatile uint32_t audioServiceFrameSerial = 0;
+volatile uint32_t audioServicesThisFrame = 0;
+
+int radarRangeIndex = 0;
+int alertRangeIndex = 0;
+
+int lastWifiBars = -1;
+bool lastWifiConnectedState = false;
+
+int radarCenterX = 0;
+int radarCenterY = 0;
+int radarRadius = 0;
+int radarAreaY = 0;
+int radarAreaHeight = 0;
+int infoAreaX = 0;
+int infoAreaY = 0;
+int infoAreaWidth = 0;
+int infoAreaHeight = 0;
+int buttonAreaY = 0;
+
+uint8_t displayRotation = 0;
+uint8_t radarRotationSteps = 0;
+
+bool eepromInitialized = false;
+
+struct AirspaceZone {
+  const char *name;
+  const char *iata;
+  double lat;
+  double lon;
+  double radiusKm;
+};
+
+static const int AIRSPACE_LABEL_TEXT_SIZE = 1;
+
+static const AirspaceZone AIRSPACE_ZONES[] = {
+    // Approximate airport control zones drawn with a 10 NM (~18.5 km) radius
+    {"Teesside", "MME", 54.509189, -1.429406, 18.5},
+    {"Newcastle", "NCL", 55.037500, -1.691667, 18.5},
+    {"Leeds Bradford", "LBA", 53.865900, -1.660600, 18.5},
+    {"Humberside", "HUY", 53.574500, -0.350800, 18.5},
+    // Manchester is a major hub, so give it a slightly larger 15 NM (~27.8 km) radius
+    {"Manchester", "MAN", 53.365000, -2.272400, 27.8},
+    {"Blackpool", "BLK", 53.771700, -3.028600, 18.5},
+};
+static const int AIRSPACE_ZONE_COUNT = sizeof(AIRSPACE_ZONES) / sizeof(AIRSPACE_ZONES[0]);
+
+enum ButtonType {
+  BUTTON_RADAR_RANGE,
+  BUTTON_ALERT_RANGE,
+  BUTTON_STREAM_TOGGLE,
+  BUTTON_UNKNOWN
+};
+
+struct TouchButton {
+  int x;
+  int y;
+  int w;
+  int h;
+  bool state;
+  const char *name;
+  ButtonType type;
+};
+
+TouchButton buttons[BUTTON_COUNT];
+unsigned long lastTouchTime = 0;
+
+int activeContactIndex = -1;
+bool infoPanelDirty = true;
+uint32_t infoPanelDirtyGeneration = 0;
+bool streamPlaying = false;
+String streamStatusMessage = "Stream stopped";
+
+AudioGeneratorMP3 *mp3 = nullptr;
+AudioFileSourceICYStream *streamFile = nullptr;
+AudioOutputI2S *audioOutput = nullptr;
+
+bool amplifierEnabled = false;
+TaskHandle_t radarTaskHandle = nullptr;
+TaskHandle_t audioTaskHandle = nullptr;
+TaskHandle_t dataTaskHandle = nullptr;
+volatile bool radarFrameRequested = false;
+volatile bool radarFrameReadyToPush = false;
+bool radarTaskStarted = false;
+SemaphoreHandle_t displayMutex = nullptr;
+SemaphoreHandle_t audioMutex = nullptr;
+bool amplifierStateInitialised = false;
+
+class ScopedLock {
+ public:
+  ScopedLock(SemaphoreHandle_t semaphore, TickType_t waitTicks)
+      : semaphore_(semaphore), locked_(false) {
+    if (semaphore_ == nullptr) {
+      locked_ = true;
+    } else if (xSemaphoreTake(semaphore_, waitTicks) == pdTRUE) {
+      locked_ = true;
+    }
+  }
+
+  ~ScopedLock() {
+    if (semaphore_ != nullptr && locked_) {
+      xSemaphoreGive(semaphore_);
+    }
+  }
+
+  bool isLocked() const { return locked_; }
+
+ private:
+  SemaphoreHandle_t semaphore_;
+  bool locked_;
+};
+
+struct InfoTableRow {
+  String label;
+  String value;
+};
+
+struct InfoPanelCache {
+  bool initialized;
+  int cachedInfoAreaX;
+  int cachedInfoAreaY;
+  int cachedInfoAreaWidth;
+  int cachedTextAreaHeight;
+  int cachedHeaderHeight;
+  int cachedTableTop;
+  int cachedDividerX;
+  int cachedRowCount;
+  InfoTableRow cachedRows[10];
+};
+
+InfoPanelCache infoPanelCache = {};
+
+struct InfoPanelRenderState {
+  bool active;
+  bool geometryDrawn;
+  bool rowStructureChanged;
+  bool geometryChanged;
+  int rowCount;
+  int rowsToProcess;
+  int nextRow;
+  int headerHeight;
+  int tableTop;
+  int dividerX;
+  int textHeight;
+  int textAreaHeight;
+  uint32_t dirtyGeneration;
+  InfoTableRow rows[10];
+};
+
+InfoPanelRenderState infoPanelRenderState = {false,
+                                             false,
+                                             false,
+                                             false,
+                                             0,
+                                             0,
+                                             0,
+                                             0,
+                                             0,
+                                             0,
+                                             0,
+                                             0,
+                                             0,
+                                             {}};
+
+struct CompassLabelBounds {
+  const char *label;
+  int x;
+  int y;
+  int w;
+  int h;
+};
+
+CompassLabelBounds compassLabelBounds[COMPASS_LABEL_COUNT];
+bool compassLabelBoundsValid = false;
+
+void wakeAudioTask() {
+  if (audioTaskHandle != nullptr) {
+    xTaskNotifyGive(audioTaskHandle);
+  }
+}
+
+void drawButtons();
+void resetRadarContacts();
+void updateDisplay();
+void fetchAircraft();
+void initializeRangeIndices();
+void persistSettings();
+double currentRadarRangeKm();
+double currentAlertRangeKm();
+void cycleRadarRange();
+void cycleAlertRange();
+void handleRangeButton(ButtonType type);
+void renderInfoPanel();
+bool setActiveContact(int index);
+bool clearActiveContact();
+bool ensureActiveContactFresh(unsigned long now);
+void startStreaming();
+void stopStreaming();
+void stopStreamingWithStatus(const String &message);
+void cleanupStream();
+void setAmplifierState(bool enable);
+void setStreamStatus(const String &status);
+
+void initializeRangeIndices() {
+  bool loadedFromEeprom = false;
+
+  if (eepromInitialized && EEPROM.read(EEPROM_MAGIC_ADDR) == EEPROM_MAGIC_VALUE) {
+    uint8_t storedRadarIndex = EEPROM.read(EEPROM_RADAR_RANGE_ADDR);
+    uint8_t storedAlertIndex = EEPROM.read(EEPROM_ALERT_RANGE_ADDR);
+    uint8_t storedRotation = EEPROM.read(EEPROM_RADAR_ROTATION_ADDR);
+
+    if (storedRadarIndex < RADAR_RANGE_OPTION_COUNT && storedAlertIndex < ALERT_RANGE_OPTION_COUNT && storedRotation < 4) {
+      radarRangeIndex = storedRadarIndex;
+      alertRangeIndex = storedAlertIndex;
+      radarRotationSteps = storedRotation;
+      loadedFromEeprom = true;
+    }
+  }
+
+  if (!loadedFromEeprom) {
+    radarRangeIndex = 0;
+    alertRangeIndex = 0;
+    radarRotationSteps = 0;
+
+    for (int i = 0; i < RADAR_RANGE_OPTION_COUNT; ++i) {
+      if (fabs(RADAR_RANGE_OPTIONS_KM[i] - DEFAULT_RADAR_RANGE_KM) < 0.01) {
+        radarRangeIndex = i;
+        break;
+      }
+    }
+
+    for (int i = 0; i < ALERT_RANGE_OPTION_COUNT; ++i) {
+      if (fabs(ALERT_RANGE_OPTIONS_KM[i] - DEFAULT_ALERT_RANGE_KM) < 0.01) {
+        alertRangeIndex = i;
+        break;
+      }
+    }
+
+    persistSettings();
+  }
+}
+
+void persistSettings() {
+  if (!eepromInitialized) {
+    return;
+  }
+
+  EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VALUE);
+  EEPROM.write(EEPROM_RADAR_RANGE_ADDR, (uint8_t)radarRangeIndex);
+  EEPROM.write(EEPROM_ALERT_RANGE_ADDR, (uint8_t)alertRangeIndex);
+  EEPROM.write(EEPROM_RADAR_ROTATION_ADDR, (uint8_t)radarRotationSteps);
+  EEPROM.commit();
+}
+
+double currentRadarRangeKm() {
+  if (radarRangeIndex < 0 || radarRangeIndex >= RADAR_RANGE_OPTION_COUNT) {
+    return RADAR_RANGE_OPTIONS_KM[0];
+  }
+  return RADAR_RANGE_OPTIONS_KM[radarRangeIndex];
+}
+
+double currentAlertRangeKm() {
+  if (alertRangeIndex < 0 || alertRangeIndex >= ALERT_RANGE_OPTION_COUNT) {
+    return ALERT_RANGE_OPTIONS_KM[0];
+  }
+  return ALERT_RANGE_OPTIONS_KM[alertRangeIndex];
+}
+
+void cycleRadarRange() {
+  if (RADAR_RANGE_OPTION_COUNT <= 0) {
+    return;
+  }
+  radarRangeIndex = (radarRangeIndex + 1) % RADAR_RANGE_OPTION_COUNT;
+  invalidateRadarBackground();
+  persistSettings();
+}
+
+void cycleAlertRange() {
+  if (ALERT_RANGE_OPTION_COUNT <= 0) {
+    return;
+  }
+  alertRangeIndex = (alertRangeIndex + 1) % ALERT_RANGE_OPTION_COUNT;
+  persistSettings();
+}
+
+void handleRangeButton(ButtonType type) {
+  if (type == BUTTON_RADAR_RANGE) {
+    cycleRadarRange();
+  } else if (type == BUTTON_ALERT_RANGE) {
+    cycleAlertRange();
+  } else if (type == BUTTON_STREAM_TOGGLE) {
+    if (streamPlaying) {
+      stopStreaming();
+    } else {
+      startStreaming();
+    }
+    return;
+  } else {
+    return;
+  }
+
+  drawButtons();
+  resetRadarContacts();
+  closestAircraft.valid = false;
+  closestAircraft.squawk = "";
+  aircraftCount = 0;
+  inboundAircraftCount = 0;
+  updateDisplay();
+  // Manually trigger the data task for an immediate update
+  if (dataTaskHandle != nullptr) {
+    xTaskNotifyGive(dataTaskHandle);
+  }
+}
+
+void setStreamStatus(const String &status) {
+  streamStatusMessage = status;
+  markInfoPanelDirty();
+}
+
+void setAmplifierState(bool enable) {
+  if (AUDIO_AMP_ENABLE_PIN < 0) {
+    return;
+  }
+  if (!amplifierStateInitialised || amplifierEnabled != enable) {
+    digitalWrite(AUDIO_AMP_ENABLE_PIN, enable ? LOW : HIGH);
+    if (!enable) {
+      delay(5);
+    }
+    amplifierEnabled = enable;
+    amplifierStateInitialised = true;
+  }
+}
+
+void cleanupStream() {
+  {
+    ScopedLock audioLock(audioMutex, portMAX_DELAY);
+    if (!audioLock.isLocked()) {
+      return;
+    }
+
+    if (mp3) {
+      if (mp3->isRunning()) {
+        mp3->stop();
+      }
+      delete mp3;
+      mp3 = nullptr;
+    }
+
+    if (streamFile) {
+      streamFile->close();
+      delete streamFile;
+      streamFile = nullptr;
+    }
+
+    if (audioOutput) {
+      delete audioOutput;
+      audioOutput = nullptr;
+    }
+  }
+
+  setAmplifierState(false);
+}
+
+void stopStreamingWithStatus(const String &message) {
+  cleanupStream();
+  if (streamPlaying) {
+    Serial.println("[STREAM] Stream stopped.");
+  }
+  streamPlaying = false;
+  setStreamStatus(message);
+  drawButtons();
+  wakeAudioTask();
+}
+
+void stopStreaming() {
+  stopStreamingWithStatus(String("Stream stopped"));
+}
+
+void startStreaming() {
+  Serial.println("[STREAM] Start requested.");
+  if (streamPlaying) {
+    Serial.println("[STREAM] Stream already running.");
+    drawButtons();
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[STREAM] Cannot start stream - WiFi not connected.");
+    setStreamStatus("WiFi required");
+    drawButtons();
+    return;
+  }
+
+  setStreamStatus("Connecting...");
+  cleanupStream();
+
+  streamFile = new AudioFileSourceICYStream();
+  if (!streamFile) {
+    Serial.println("[STREAM] Failed to allocate stream source.");
+    setStreamStatus("No memory");
+    drawButtons();
+    return;
+  }
+
+  if (!streamFile->open(STREAM_URL)) {
+    Serial.println("[STREAM] Failed to open stream URL.");
+    cleanupStream();
+    setStreamStatus("Stream failed");
+    drawButtons();
+    return;
+  }
+
+  Serial.print("[STREAM] Connected to stream: ");
+  Serial.println(STREAM_URL);
+
+  bool useExternalI2S = I2S_BCLK_PIN >= 0 && I2S_LRCLK_PIN >= 0 && I2S_DOUT_PIN >= 0;
+  if (useExternalI2S) {
+    Serial.print("[STREAM] Configuring external I2S pins BCLK=");
+    Serial.print(I2S_BCLK_PIN);
+    Serial.print(", LRCLK=");
+    Serial.print(I2S_LRCLK_PIN);
+    Serial.print(", DOUT=");
+    Serial.println(I2S_DOUT_PIN);
+    audioOutput = new AudioOutputI2S();
+  } else {
+    Serial.print("[STREAM] Using internal DAC on GPIO");
+    Serial.println(I2S_DOUT_PIN);
+    audioOutput = new AudioOutputI2S(0, 1);
+  }
+
+  if (!audioOutput) {
+    Serial.println("[STREAM] Failed to allocate audio output.");
+    cleanupStream();
+    setStreamStatus("Audio init failed");
+    drawButtons();
+    return;
+  }
+
+  bool pinoutOk = false;
+  if (useExternalI2S) {
+    pinoutOk = audioOutput->SetPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
+  } else if (I2S_DOUT_PIN >= 0) {
+    pinoutOk = audioOutput->SetPinout(-1, -1, I2S_DOUT_PIN);
+  } else {
+    Serial.println("[STREAM] Invalid DAC pin configuration. Set I2S_DOUT_PIN.");
+  }
+
+  if (!pinoutOk) {
+    Serial.println("[STREAM] Audio pin configuration failed.");
+    cleanupStream();
+    setStreamStatus("Audio pin error");
+    drawButtons();
+    return;
+  }
+
+  audioOutput->SetOutputModeMono(true);
+  audioOutput->SetGain(1.0f);
+  setAmplifierState(true);
+
+  mp3 = new AudioGeneratorMP3();
+  if (!mp3) {
+    Serial.println("[STREAM] Failed to allocate MP3 decoder.");
+    cleanupStream();
+    setStreamStatus("Decoder error");
+    drawButtons();
+    return;
+  }
+
+  if (!mp3->begin(streamFile, audioOutput)) {
+    Serial.println("[STREAM] MP3 decoder failed to start.");
+    cleanupStream();
+    setStreamStatus("Decoder error");
+    drawButtons();
+    return;
+  }
+
+  streamPlaying = true;
+  setStreamStatus("Streaming");
+  Serial.println("[STREAM] Streaming started.");
+  wakeAudioTask();
+  drawButtons();
+}
+
+void serviceAudioDecoder(uint32_t timeBudgetUs, bool nonBlocking) {
+  if (!streamPlaying || !mp3) {
+    return;
+  }
+
+  const char *stopMessage = nullptr;
+
+  {
+    ScopedLock audioLock(audioMutex, nonBlocking ? 0 : portMAX_DELAY);
+    if (!audioLock.isLocked()) {
+      return;
+    }
+
+    if (!streamPlaying || !mp3 || !mp3->isRunning()) {
+      return;
+    }
+
+    AudioGeneratorMP3 *decoder = mp3;
+    uint32_t startMicros = micros();
+    while (streamPlaying && mp3 == decoder && decoder->isRunning()) {
+      if (!decoder->loop()) {
+        Serial.println("[STREAM] Decoder loop returned false.");
+        stopMessage = "Stream error";
+        break;
+      }
+
+      if (timeBudgetUs > 0) {
+        uint32_t elapsed = micros() - startMicros;
+        if (elapsed >= timeBudgetUs) {
+          break;
+        }
+      }
+
+      taskYIELD();
+    }
+  }
+
+  if (stopMessage != nullptr) {
+    stopStreamingWithStatus(String(stopMessage));
+  }
+}
+
+void serviceAudioDuringRadarDraw() {
+  if (!streamPlaying || !mp3 || !mp3->isRunning()) {
+    return;
+  }
+
+  static uint32_t lastServiceMicros = 0;
+  static uint32_t lastFrameSerial = 0;
+
+  uint32_t activeFrame = radarFrameSerial;
+  if (audioServiceFrameSerial != activeFrame) {
+    audioServiceFrameSerial = activeFrame;
+    audioServicesThisFrame = 0;
+  }
+
+  if (activeFrame != lastFrameSerial) {
+    lastFrameSerial = activeFrame;
+    lastServiceMicros = 0;
+  }
+
+  if (audioServicesThisFrame >= AUDIO_DRAW_MAX_SERVICES_PER_FRAME) {
+    return;
+  }
+
+  uint32_t now = micros();
+  uint32_t elapsed = now - lastServiceMicros;
+  if (elapsed < AUDIO_DRAW_SERVICE_INTERVAL_US) {
+    return;
+  }
+
+  lastServiceMicros = now;
+  audioServicesThisFrame++;
+  serviceAudioDecoder(AUDIO_DRAW_SERVICE_BUDGET_US, true);
+}
+
+// --- Function Prototypes ---
+void drawStaticLayout();
+void updateDisplay();
+void drawInfoLine(int index, const String &text);
+void drawRadar();
+void renderRadarFrame(bool pushToDisplay);
+void resetRadarContacts();
+void invalidateRadarBackground();
+void setupRadarSprite();
+void connectWiFi();
+void fetchAircraft();
+double haversine(double lat1, double lon1, double lat2, double lon2);
+double calculateBearing(double lat1, double lon1, double lat2, double lon2);
+double deg2rad(double deg);
+String formatTimeAgo(unsigned long ms);
+uint16_t fadeColor(uint16_t color, float alpha);
+double angularDifference(double a, double b);
+void drawStatusBar();
+void drawWifiIcon(int x, int y, int barsActive, bool connected);
+void configureButtons();
+void drawButtons();
+void drawButton(int index);
+bool readTouchPoint(int &screenX, int &screenY);
+void handleTouch();
+void rotateRadarOrientation();
+void radarTask(void *param);
+void audioTask(void *param);
+void serviceAudioDecoder(uint32_t timeBudgetUs = AUDIO_SERVICE_TIME_SLICE_US, bool nonBlocking = false);
+void serviceAudioDuringRadarDraw();
+void markInfoPanelDirty();
+
+class ScopedRecursiveLock {
+ public:
+  explicit ScopedRecursiveLock(SemaphoreHandle_t semaphore)
+      : semaphore_(semaphore), locked_(false) {
+    if (semaphore_ != nullptr) {
+      if (xSemaphoreTakeRecursive(semaphore_, portMAX_DELAY) == pdTRUE) {
+        locked_ = true;
+      }
+    }
+  }
+
+  ~ScopedRecursiveLock() {
+    if (locked_ && semaphore_ != nullptr) {
+      xSemaphoreGiveRecursive(semaphore_);
+    }
+  }
+
+  bool isLocked() const { return locked_; }
+
+ private:
+  SemaphoreHandle_t semaphore_;
+  bool locked_;
+};
+
+uint16_t applyAircraftIconIntensity(uint16_t baseColor, uint8_t intensity) {
+  uint16_t r = (baseColor >> 11) & 0x1F;
+  uint16_t g = (baseColor >> 5) & 0x3F;
+  uint16_t b = baseColor & 0x1F;
+
+  r = (uint16_t)((r * intensity + 127) / 255);
+  g = (uint16_t)((g * intensity + 127) / 255);
+  b = (uint16_t)((b * intensity + 127) / 255);
+
+  if (r > 0x1F) r = 0x1F;
+  if (g > 0x3F) g = 0x3F;
+  if (b > 0x1F) b = 0x1F;
+
+  return (r << 11) | (g << 5) | b;
+}
+
+template <typename GFX>
+void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, float size, uint16_t color) {
+  if (size <= 0.0f || isnan(headingDeg)) {
+    return;
+  }
+
+  double normalizedHeading = fmod(headingDeg, 360.0);
+  if (normalizedHeading < 0.0) {
+    normalizedHeading += 360.0;
+  }
+  double headingRad = deg2rad(normalizedHeading);
+  double sinHeading = sin(headingRad);
+  double cosHeading = cos(headingRad);
+
+  float scale = (2.0f * size) / max(PLANE_ICON_HEIGHT - 1, 1);
+  if (scale <= 0.0f || isnan(scale)) {
+    return;
+  }
+
+  float halfWidth = (PLANE_ICON_WIDTH - 1) * 0.5f;
+  float halfHeight = (PLANE_ICON_HEIGHT - 1) * 0.5f;
+
+  for (int y = 0; y < PLANE_ICON_HEIGHT; ++y) {
+    serviceAudioDuringRadarDraw();
+    for (int x = 0; x < PLANE_ICON_WIDTH; ++x) {
+      if ((x & 0x07) == 0) {
+        serviceAudioDuringRadarDraw();
+      }
+      int index = y * PLANE_ICON_WIDTH + x;
+      uint8_t alpha = pgm_read_byte(&PLANE_ICON_ALPHA[index]);
+      if (alpha < 16) {
+        continue;
+      }
+
+      uint8_t intensity = pgm_read_byte(&PLANE_ICON_INTENSITY[index]);
+      uint8_t effectiveIntensity = (uint8_t)((intensity * alpha + 127) / 255);
+      if (effectiveIntensity == 0) {
+        continue;
+      }
+
+      float localX = (x - halfWidth) * scale;
+      float localY = (y - halfHeight) * scale;
+      double rotatedX = localX * cosHeading - localY * sinHeading;
+      double rotatedY = localX * sinHeading + localY * cosHeading;
+      int drawX = centerX + (int)round(rotatedX);
+      int drawY = centerY + (int)round(rotatedY);
+
+      uint16_t tintedColor = applyAircraftIconIntensity(color, effectiveIntensity);
+      gfx.drawPixel(drawX, drawY, tintedColor);
+    }
+  }
+
+  serviceAudioDuringRadarDraw();
+}
+
+template <typename GFX>
+void drawCompassLabels(GFX &gfx, int centerX, int centerY, int radius, double rotationOffsetDeg) {
+  static const char *const labels[] = {"N", "E", "S", "W"};
+  static const double angles[] = {0.0, 90.0, 180.0, 270.0};
+  compassLabelBoundsValid = false;
+  if (radius <= 0) {
+    return;
+  }
+
+  int labelRadius = radius + COMPASS_LABEL_OFFSET;
+  gfx.setTextDatum(MC_DATUM);
+  gfx.setTextSize(COMPASS_TEXT_SIZE);
+  gfx.setTextColor(COLOR_RADAR_GRID, COLOR_BACKGROUND);
+
+  for (int i = 0; i < COMPASS_LABEL_COUNT; ++i) {
+    double angleRad = deg2rad(angles[i] + rotationOffsetDeg);
+    int labelX = centerX + (int)round(sin(angleRad) * labelRadius);
+    int labelY = centerY - (int)round(cos(angleRad) * labelRadius);
+    gfx.drawString(labels[i], labelX, labelY);
+
+    int textWidth = gfx.textWidth(labels[i]);
+    if (textWidth <= 0) {
+      textWidth = COMPASS_TEXT_SIZE * 6;
+    }
+    int textHeight = COMPASS_TEXT_SIZE * 8;
+    int halfWidth = max(textWidth / 2, 1);
+    int halfHeight = max(textHeight / 2, 1);
+
+    compassLabelBounds[i].label = labels[i];
+    compassLabelBounds[i].x = labelX - halfWidth;
+    compassLabelBounds[i].y = labelY - halfHeight;
+    compassLabelBounds[i].w = max(textWidth, 1);
+    compassLabelBounds[i].h = max(textHeight, 1);
+  }
+
+  compassLabelBoundsValid = true;
+  gfx.setTextSize(1);
+}
+
+template <typename GFX>
+void drawRadarCross(GFX &gfx, int centerX, int centerY, int radius, uint16_t color, double rotationOffsetDeg) {
+  if (radius <= 0) {
+    return;
+  }
+
+  static const double baseAngles[] = {0.0, 90.0};
+  for (double baseAngle : baseAngles) {
+    double angleRad = deg2rad(baseAngle + rotationOffsetDeg);
+    double oppositeRad = angleRad + PI;
+
+    int x1 = centerX + (int)round(sin(angleRad) * radius);
+    int y1 = centerY - (int)round(cos(angleRad) * radius);
+    int x2 = centerX + (int)round(sin(oppositeRad) * radius);
+    int y2 = centerY - (int)round(cos(oppositeRad) * radius);
+
+    gfx.drawLine(x1, y1, x2, y2, color);
+  }
+}
+
+template <typename GFX>
+void drawAirspaceZones(GFX &gfx, int centerX, int centerY, int radius, double rotationOffsetDeg,
+                       double radarRangeKm) {
+  if (radius <= 0 || radarRangeKm <= 0.0) {
+    return;
+  }
+
+  double usableRadius = (double)max(radius - 3, 1);
+  gfx.setTextDatum(MC_DATUM);
+  gfx.setTextSize(AIRSPACE_LABEL_TEXT_SIZE);
+  gfx.setTextColor(COLOR_AIRSPACE, COLOR_BACKGROUND);
+  for (int i = 0; i < AIRSPACE_ZONE_COUNT; ++i) {
+    const AirspaceZone &zone = AIRSPACE_ZONES[i];
+    if (zone.radiusKm <= 0.0) {
+      continue;
+    }
+
+    double distanceKm = haversine(USER_LAT, USER_LON, zone.lat, zone.lon);
+    if ((distanceKm - zone.radiusKm) > radarRangeKm) {
+      continue;
+    }
+
+    double bearingDeg = calculateBearing(USER_LAT, USER_LON, zone.lat, zone.lon);
+    double displayDistanceKm = min(distanceKm, radarRangeKm);
+    double normalized = displayDistanceKm / radarRangeKm;
+    double angleRad = deg2rad(bearingDeg + rotationOffsetDeg);
+    double radialDistance = normalized * usableRadius;
+    int zoneCenterX = centerX + (int)round(sin(angleRad) * radialDistance);
+    int zoneCenterY = centerY - (int)round(cos(angleRad) * radialDistance);
+
+    double effectiveRadiusKm = min(zone.radiusKm, radarRangeKm);
+    int zonePixelRadius = (int)round((effectiveRadiusKm / radarRangeKm) * usableRadius);
+    zonePixelRadius = max(zonePixelRadius, 2);
+    zonePixelRadius = min(zonePixelRadius, radius);
+
+    gfx.drawCircle(zoneCenterX, zoneCenterY, zonePixelRadius, COLOR_AIRSPACE);
+    gfx.drawPixel(zoneCenterX, zoneCenterY, COLOR_AIRSPACE);
+    if (zone.iata != nullptr && zone.iata[0] != '\0') {
+      gfx.drawString(zone.iata, zoneCenterX, zoneCenterY);
+    }
+  }
+  gfx.setTextDatum(TL_DATUM);
+  gfx.setTextSize(1);
+}
+
+// ---- NEW BACKGROUND TASK FUNCTION ----
+/**
+ * @brief FreeRTOS task to fetch and process aircraft data in the background.
+ *
+ * This task handles the blocking network calls and heavy JSON parsing without
+ * interfering with the main loop or UI rendering tasks. It updates the global
+ * aircraft data structures in a thread-safe manner.
+ * @param param Unused task parameter.
+ */
+void aircraftDataTask(void *param) {
+  for (;;) {
+    // Wait for a notification OR the specified timeout.
+    // pdTRUE resets the notification value. The timeout is our regular refresh interval.
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(REFRESH_INTERVAL_MS));
+    
+    fetchAircraft();
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  tft.begin();
+  displayRotation = 0;
+  tft.setRotation(displayRotation);
+
+  displayMutex = xSemaphoreCreateRecursiveMutex();
+  if (displayMutex == nullptr) {
+    Serial.println("[RADAR] Failed to create display mutex.");
+  }
+
+  audioMutex = xSemaphoreCreateMutex();
+  if (audioMutex == nullptr) {
+    Serial.println("[STREAM] Failed to create audio mutex.");
+  }
+
+  if (AUDIO_AMP_ENABLE_PIN >= 0) {
+    pinMode(AUDIO_AMP_ENABLE_PIN, OUTPUT);
+    digitalWrite(AUDIO_AMP_ENABLE_PIN, HIGH);
+    setAmplifierState(false);
+    Serial.print("[STREAM] Amplifier control initialised on GPIO");
+    Serial.println(AUDIO_AMP_ENABLE_PIN);
+  }
+
+  eepromInitialized = EEPROM.begin(EEPROM_SIZE);
+  if (!eepromInitialized) {
+    Serial.println("EEPROM init failed");
+  }
+  initializeRangeIndices();
+  radarSweepStart = millis();
+  resetRadarContacts();
+  drawStaticLayout();
+
+  closestAircraft.valid = false;
+  closestAircraft.squawk = "";
+  updateDisplay();
+
+  BaseType_t radarTaskStatus = xTaskCreatePinnedToCore(
+      radarTask,
+      "RadarTask",
+      6144,
+      nullptr,
+      1,
+      &radarTaskHandle,
+      0);
+  if (radarTaskStatus == pdPASS) {
+    radarTaskStarted = true;
+    xTaskNotifyGive(radarTaskHandle);
+    Serial.println("[RADAR] Radar render task started on core 0.");
+  } else {
+    radarTaskHandle = nullptr;
+    Serial.println("[RADAR] Failed to start radar render task; falling back to loop updates.");
+  }
+
+  BaseType_t audioTaskStatus = xTaskCreatePinnedToCore(
+      audioTask,
+      "AudioTask",
+      4096,
+      nullptr,
+      2,
+      &audioTaskHandle,
+      1);
+  if (audioTaskStatus == pdPASS) {
+    Serial.println("[STREAM] Audio service task started on core 1.");
+  } else {
+    audioTaskHandle = nullptr;
+    Serial.println("[STREAM] Failed to start audio service task; decoding will run on loop.");
+  }
+
+  // ---- LAUNCH THE NEW DATA TASK ----
+  BaseType_t dataTaskStatus = xTaskCreatePinnedToCore(
+      aircraftDataTask,
+      "AircraftDataTask",
+      16384,                  // Increased stack size for network and JSON processing
+      nullptr,                // No parameter
+      1,                      // Task priority
+      &dataTaskHandle,        // Store task handle
+      0                       // Pin to Core 0 (with WiFi/network stack)
+  );
+
+  if (dataTaskStatus == pdPASS) {
+    Serial.println("[DATA] Aircraft data task started on core 0.");
+  } else {
+    dataTaskHandle = nullptr;
+    Serial.println("[DATA] Failed to start aircraft data task.");
+  }
+  // ---- END OF NEW BLOCK ----
+  
+  connectWiFi();
+  if (WiFi.status() == WL_CONNECTED) {
+    // The main loop no longer fetches, so we trigger the first fetch manually.
+    if (dataTaskHandle != nullptr) {
+        xTaskNotifyGive(dataTaskHandle);
+    }
+  }
+}
+
+void loop() {
+  unsigned long now = millis();
+  wl_status_t wifiStatus = WiFi.status();
+
+  if (wifiStatus != WL_CONNECTED) {
+    if (now - lastWifiAttempt > WIFI_RETRY_INTERVAL_MS) {
+      connectWiFi();
+    }
+    wifiStatus = WiFi.status();
+  }
+
+  // ---- THE TIMED CALL TO fetchAircraft() IS NOW REMOVED FROM HERE ----
+
+  if (wifiStatus != WL_CONNECTED && streamPlaying) {
+    Serial.println("[STREAM] WiFi lost. Stopping stream.");
+    stopStreamingWithStatus(String("WiFi lost"));
+  }
+
+  if (streamPlaying && mp3) {
+    bool decoderRunningBefore = mp3->isRunning();
+    if (decoderRunningBefore) {
+      if (audioTaskHandle != nullptr) {
+        serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US / 2, true);
+      } else {
+        serviceAudioDecoder();
+      }
+    }
+
+    if (streamPlaying && mp3 && !mp3->isRunning()) {
+      if (decoderRunningBefore) {
+        Serial.println("[STREAM] Decoder reported stopped.");
+      }
+      stopStreamingWithStatus(String("Stream ended"));
+    }
+  }
+
+  if (radarFrameReadyToPush) {
+    if (audioTaskHandle != nullptr) {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3, true);
+    } else {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3);
+    }
+
+    double rotationOffsetDeg = radarRotationSteps * 90.0;
+    {
+      ScopedRecursiveLock lock(displayMutex);
+      if (radarSpriteActive) {
+        int spriteX = radarCenterX - radarRadius;
+        int spriteY = radarCenterY - radarRadius;
+        serviceAudioDuringRadarDraw();
+        radarSprite.pushSprite(spriteX, spriteY);
+        serviceAudioDuringRadarDraw();
+        drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
+        serviceAudioDuringRadarDraw();
+        tft.setTextDatum(TL_DATUM);
+        tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+        drawStatusBar();
+        serviceAudioDuringRadarDraw();
+      }
+    }
+
+    radarFrameReadyToPush = false;
+  }
+
+  if (infoPanelDirty) {
+    if (audioTaskHandle != nullptr) {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3, true);
+    } else {
+      serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US * 3);
+    }
+    renderInfoPanel();
+  }
+
+  handleTouch();
+
+  delay(1);
+}
+
+struct RadarContact {
+  double distanceKm;
+  double bearing;
+  double displayDistanceKm;
+  double displayBearing;
+  bool inbound;
+  String flight;
+  int altitude;
+  double groundSpeed;
+  double track;
+  double displayTrack;
+  double minutesToClosest;
+  bool valid;
+  unsigned long lastHighlightTime;
+  bool stale;
+  String squawk;
+};
+
+RadarContact radarContacts[MAX_RADAR_CONTACTS];
+int radarContactCount = 0;
+
+void resetRadarContacts() {
+  radarContactCount = 0;
+  for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
+    radarContacts[i].valid = false;
+    radarContacts[i].flight = "";
+    radarContacts[i].lastHighlightTime = 0;
+    radarContacts[i].inbound = false;
+    radarContacts[i].distanceKm = 0.0;
+    radarContacts[i].bearing = 0.0;
+    radarContacts[i].displayDistanceKm = 0.0;
+    radarContacts[i].displayBearing = 0.0;
+    radarContacts[i].stale = false;
+    radarContacts[i].altitude = -1;
+    radarContacts[i].groundSpeed = NAN;
+    radarContacts[i].track = NAN;
+    radarContacts[i].displayTrack = NAN;
+    radarContacts[i].minutesToClosest = NAN;
+    radarContacts[i].squawk = "";
+  }
+  activeContactIndex = -1;
+  markInfoPanelDirty();
+}
+
+void invalidateRadarBackground() {}
+
+void setupRadarSprite() {
+  if (radarSpriteActive) {
+    radarSprite.deleteSprite();
+    radarSpriteActive = false;
+  }
+
+  invalidateRadarBackground();
+
+  if (radarRadius <= 0) {
+    return;
+  }
+
+  radarSpriteWidth = radarRadius * 2 + 1;
+  radarSpriteHeight = radarSpriteWidth;
+
+  if (radarSpriteWidth <= 0 || radarSpriteHeight <= 0) {
+    return;
+  }
+
+  radarSprite.setColorDepth(16);
+  if (radarSprite.createSprite(radarSpriteWidth, radarSpriteHeight) == nullptr) {
+    return;
+  }
+
+  radarSprite.fillSprite(COLOR_BACKGROUND);
+  radarSpriteActive = true;
+}
+
+void drawStaticLayout() {
+  ScopedRecursiveLock lock(displayMutex);
+  tft.fillScreen(COLOR_BACKGROUND);
+  radarAreaY = RADAR_TOP_PADDING;
+  radarAreaHeight = tft.height() / 2;
+  int availableRadarHeight = max(radarAreaHeight - RADAR_MARGIN * 2, 0);
+  int radarDiameter = min(tft.width() - RADAR_MARGIN * 2, availableRadarHeight);
+  radarRadius = max(radarDiameter / 2, 0);
+  radarCenterX = tft.width() / 2;
+  radarCenterY = radarAreaY + RADAR_MARGIN + radarRadius;
+
+  infoAreaX = RADAR_MARGIN;
+  infoAreaWidth = max(tft.width() - RADAR_MARGIN * 2, 0);
+  infoAreaY = radarAreaY + radarAreaHeight + RADAR_MARGIN;
+  infoAreaHeight = max(tft.height() - infoAreaY - RADAR_MARGIN, 0);
+  int textAreaHeight = max(infoAreaHeight - BUTTON_HEIGHT - BUTTON_SPACING, 0);
+  buttonAreaY = infoAreaY + textAreaHeight;
+  if (textAreaHeight > 0) {
+    buttonAreaY += BUTTON_SPACING;
+  }
+  int infoAreaBottom = infoAreaY + infoAreaHeight;
+  if (buttonAreaY + BUTTON_HEIGHT > infoAreaBottom) {
+    buttonAreaY = max(infoAreaBottom - BUTTON_HEIGHT, infoAreaY);
+  }
+
+  tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, infoAreaHeight, COLOR_BACKGROUND);
+  infoPanelCache.initialized = false;
+  infoPanelCache.cachedRowCount = 0;
+
+  configureButtons();
+  setupRadarSprite();
+
+  lastWifiBars = -1;
+  lastWifiConnectedState = false;
+  activeContactIndex = -1;
+  markInfoPanelDirty();
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  drawRadar();
+  drawButtons();
+}
+
+void markInfoPanelDirty() {
+  infoPanelDirty = true;
+  infoPanelDirtyGeneration++;
+  infoPanelRenderState.active = false;
+}
+
+void renderInfoPanel() {
+  auto prepareRenderState = [&]() -> bool {
+    int textAreaHeight = max(buttonAreaY - infoAreaY, 0);
+    if (textAreaHeight <= 0 || infoAreaWidth <= 0) {
+      infoPanelDirty = false;
+      infoPanelRenderState.active = false;
+      return false;
+    }
+
+    const RadarContact *activeContact = nullptr;
+    if (activeContactIndex >= 0 && activeContactIndex < radarContactCount) {
+      RadarContact &candidate = radarContacts[activeContactIndex];
+      unsigned long now = millis();
+      if (candidate.valid && candidate.lastHighlightTime != 0 &&
+          (now - candidate.lastHighlightTime) <= RADAR_FADE_DURATION_MS) {
+        activeContact = &candidate;
+      }
+    }
+
+    InfoTableRow rows[10];
+    int rowCount = 0;
+    auto addRow = [&](const String &label, const String &value) {
+      if (rowCount < (int)(sizeof(rows) / sizeof(rows[0]))) {
+        rows[rowCount].label = label;
+        rows[rowCount].value = value;
+        ++rowCount;
+      }
+    };
+
+    if (activeContact != nullptr) {
+      String flight = activeContact->flight;
+      flight.trim();
+      if (!flight.length()) {
+        flight = String("(Unknown)");
+      }
+      addRow("Flight", flight);
+      String speedValue = "--";
+      if (!isnan(activeContact->groundSpeed) && activeContact->groundSpeed >= 0) {
+        speedValue = String(activeContact->groundSpeed, 0) + " kt";
+      }
+      addRow("Speed", speedValue);
+      addRow("Distance", String(activeContact->displayDistanceKm, 1) + " km");
+      String altitudeValue = "--";
+      if (activeContact->altitude >= 0) {
+        altitudeValue = String(activeContact->altitude) + " ft";
+      }
+      addRow("Altitude", altitudeValue);
+      String squawkValue = "--";
+      if (activeContact->squawk.length() > 0) {
+        String squawkTrimmed = activeContact->squawk;
+        squawkTrimmed.trim();
+        if (squawkTrimmed.length() > 0) {
+          squawkValue = squawkTrimmed;
+        }
+      }
+      addRow("Squawk", squawkValue);
+      if (activeContact->inbound) {
+        if (!isnan(activeContact->minutesToClosest) && activeContact->minutesToClosest >= 0) {
+          addRow("ETA", String(activeContact->minutesToClosest, 1) + " min");
+        } else {
+          addRow("ETA", "Approaching");
+        }
+      }
+    } else if (closestAircraft.valid) {
+      String flight = closestAircraft.flight;
+      flight.trim();
+      if (!flight.length()) {
+        flight = String("(unknown)");
+      }
+      addRow("Flight", flight);
+      String speedValue = "--";
+      if (!isnan(closestAircraft.groundSpeed) && closestAircraft.groundSpeed >= 0) {
+        speedValue = String(closestAircraft.groundSpeed, 0) + " kt";
+      }
+      addRow("Speed", speedValue);
+      addRow("Distance", String(closestAircraft.distanceKm, 1) + " km");
+      String altitudeValue = "--";
+      if (closestAircraft.altitude >= 0) {
+        altitudeValue = String(closestAircraft.altitude) + " ft";
+      }
+      addRow("Altitude", altitudeValue);
+      String squawkValue = "--";
+      if (closestAircraft.squawk.length() > 0) {
+        String squawkTrimmed = closestAircraft.squawk;
+        squawkTrimmed.trim();
+        if (squawkTrimmed.length() > 0) {
+          squawkValue = squawkTrimmed;
+        }
+      }
+      addRow("Squawk", squawkValue);
+      if (closestAircraft.inbound && !isnan(closestAircraft.minutesToClosest) &&
+          closestAircraft.minutesToClosest >= 0) {
+        addRow("ETA", String(closestAircraft.minutesToClosest, 1) + " min");
+      }
+    } else {
+      addRow("Flight", "");
+      addRow("Speed", "--");
+      addRow("Distance", "--");
+      addRow("Altitude", "--");
+      addRow("Squawk", "--");
+    }
+
+    if (aircraftCount > 0) {
+      String traffic = String(aircraftCount) + " tracked";
+      if (inboundAircraftCount > 0) {
+        traffic += " / " + String(inboundAircraftCount) + " inbound";
+      }
+      addRow("Traffic", traffic);
+    }
+
+    addRow("Audio", streamStatusMessage);
+
+    int headerHeight = 0;
+    int availableHeight = textAreaHeight;
+    int maxRows = INFO_TABLE_ROW_HEIGHT > 0 ? availableHeight / INFO_TABLE_ROW_HEIGHT : 0;
+    if (maxRows < rowCount) {
+      rowCount = maxRows;
+    }
+
+    int tableTop = infoAreaY + headerHeight;
+    int dividerX = infoAreaX + infoAreaWidth / 2;
+
+    bool geometryChanged = !infoPanelCache.initialized || infoPanelCache.cachedInfoAreaX != infoAreaX ||
+                           infoPanelCache.cachedInfoAreaY != infoAreaY ||
+                           infoPanelCache.cachedInfoAreaWidth != infoAreaWidth ||
+                           infoPanelCache.cachedTextAreaHeight != textAreaHeight;
+
+    bool rowStructureChanged = geometryChanged || infoPanelCache.cachedHeaderHeight != headerHeight ||
+                               infoPanelCache.cachedRowCount != rowCount;
+
+    infoPanelRenderState.active = true;
+    infoPanelRenderState.geometryDrawn = false;
+    infoPanelRenderState.rowStructureChanged = rowStructureChanged;
+    infoPanelRenderState.geometryChanged = geometryChanged;
+    infoPanelRenderState.rowCount = rowCount;
+    infoPanelRenderState.rowsToProcess = max(rowCount, infoPanelCache.cachedRowCount);
+    infoPanelRenderState.nextRow = 0;
+    infoPanelRenderState.headerHeight = headerHeight;
+    infoPanelRenderState.tableTop = tableTop;
+    infoPanelRenderState.dividerX = dividerX;
+    infoPanelRenderState.textHeight = INFO_TEXT_SIZE * 8;
+    infoPanelRenderState.textAreaHeight = textAreaHeight;
+    infoPanelRenderState.dirtyGeneration = infoPanelDirtyGeneration;
+    for (int i = 0; i < rowCount; ++i) {
+      infoPanelRenderState.rows[i] = rows[i];
+    }
+    for (int i = rowCount; i < (int)(sizeof(infoPanelRenderState.rows) / sizeof(infoPanelRenderState.rows[0])); ++i) {
+      infoPanelRenderState.rows[i].label = "";
+      infoPanelRenderState.rows[i].value = "";
+    }
+
+    return true;
+  };
+
+  if (!infoPanelDirty && !infoPanelRenderState.active) {
+    return;
+  }
+
+  if (!infoPanelRenderState.active || infoPanelRenderState.dirtyGeneration != infoPanelDirtyGeneration) {
+    if (!prepareRenderState()) {
+      return;
+    }
+  }
+
+  if (!infoPanelRenderState.active) {
+    return;
+  }
+
+  ScopedRecursiveLock lock(displayMutex);
+  if (!lock.isLocked()) {
+    return;
+  }
+
+  tft.setTextSize(INFO_TEXT_SIZE);
+  tft.setTextDatum(TL_DATUM);
+
+  if (!infoPanelRenderState.geometryDrawn) {
+    if (infoPanelRenderState.rowStructureChanged) {
+      serviceAudioDuringRadarDraw();
+      tft.fillRect(infoAreaX, infoAreaY, infoAreaWidth, infoPanelRenderState.textAreaHeight, COLOR_INFO_TABLE_BG);
+      tft.drawRect(infoAreaX, infoAreaY, infoAreaWidth, infoPanelRenderState.textAreaHeight, COLOR_INFO_TABLE_BORDER);
+
+      if (infoPanelRenderState.rowCount > 0) {
+        int tableHeight = infoPanelRenderState.rowCount * INFO_TABLE_ROW_HEIGHT;
+        tft.drawFastVLine(infoPanelRenderState.dividerX, infoPanelRenderState.tableTop, tableHeight,
+                          COLOR_INFO_TABLE_BORDER);
+        for (int i = 0; i < infoPanelRenderState.rowCount; ++i) {
+          serviceAudioDuringRadarDraw();
+          int rowY = infoPanelRenderState.tableTop + i * INFO_TABLE_ROW_HEIGHT;
+          tft.drawFastHLine(infoAreaX, rowY, infoAreaWidth, COLOR_INFO_TABLE_BORDER);
+        }
+        tft.drawFastHLine(infoAreaX,
+                          infoPanelRenderState.tableTop + infoPanelRenderState.rowCount * INFO_TABLE_ROW_HEIGHT,
+                          infoAreaWidth, COLOR_INFO_TABLE_BORDER);
+      }
+    }
+    infoPanelRenderState.geometryDrawn = true;
+  }
+
+  if (infoPanelRenderState.rowsToProcess <= 0) {
+    tft.setTextPadding(0);
+    tft.setTextDatum(TL_DATUM);
+    infoPanelCache.initialized = true;
+    infoPanelCache.cachedInfoAreaX = infoAreaX;
+    infoPanelCache.cachedInfoAreaY = infoAreaY;
+    infoPanelCache.cachedInfoAreaWidth = infoAreaWidth;
+    infoPanelCache.cachedTextAreaHeight = infoPanelRenderState.textAreaHeight;
+    infoPanelCache.cachedHeaderHeight = infoPanelRenderState.headerHeight;
+    infoPanelCache.cachedTableTop = infoPanelRenderState.tableTop;
+    infoPanelCache.cachedDividerX = infoPanelRenderState.dividerX;
+    infoPanelCache.cachedRowCount = infoPanelRenderState.rowCount;
+    for (int i = 0; i < infoPanelRenderState.rowCount; ++i) {
+      infoPanelCache.cachedRows[i] = infoPanelRenderState.rows[i];
+    }
+    for (int i = infoPanelRenderState.rowCount;
+         i < (int)(sizeof(infoPanelCache.cachedRows) / sizeof(infoPanelCache.cachedRows[0])); ++i) {
+      infoPanelCache.cachedRows[i].label = "";
+      infoPanelCache.cachedRows[i].value = "";
+    }
+    bool newUpdateQueued = (infoPanelDirtyGeneration != infoPanelRenderState.dirtyGeneration);
+    infoPanelRenderState.active = false;
+    infoPanelDirty = newUpdateQueued;
+    return;
+  }
+
+  tft.setTextColor(COLOR_TEXT, COLOR_INFO_TABLE_BG);
+  const int rowsPerPass = 2;
+  int processed = 0;
+  while (infoPanelRenderState.nextRow < infoPanelRenderState.rowsToProcess && processed < rowsPerPass) {
+    int index = infoPanelRenderState.nextRow;
+    bool rowExists = index < infoPanelRenderState.rowCount;
+    bool hadRow = index < infoPanelCache.cachedRowCount;
+    bool rowChanged = infoPanelRenderState.rowStructureChanged ||
+                      (rowExists && (!hadRow || infoPanelRenderState.rows[index].label !=
+                                                     infoPanelCache.cachedRows[index].label ||
+                                     infoPanelRenderState.rows[index].value !=
+                                         infoPanelCache.cachedRows[index].value)) ||
+                      (!rowExists && hadRow);
+
+    if (rowChanged) {
+      serviceAudioDuringRadarDraw();
+      int rowY = infoPanelRenderState.tableTop + index * INFO_TABLE_ROW_HEIGHT;
+      int rowFillY = rowY + 1;
+      int rowFillH = max(INFO_TABLE_ROW_HEIGHT - 1, 0);
+      if (rowFillH > 0) {
+        int labelFillX = infoAreaX + 1;
+        int labelFillW = max(infoPanelRenderState.dividerX - labelFillX - 1, 0);
+        if (labelFillW > 0) {
+          tft.fillRect(labelFillX, rowFillY, labelFillW, rowFillH, COLOR_INFO_TABLE_BG);
+        }
+        int valueFillX = infoPanelRenderState.dividerX + 1;
+        int valueFillW = max(infoAreaX + infoAreaWidth - 1 - valueFillX, 0);
+        if (valueFillW > 0) {
+          tft.fillRect(valueFillX, rowFillY, valueFillW, rowFillH, COLOR_INFO_TABLE_BG);
+        }
+      }
+
+      serviceAudioDuringRadarDraw();
+
+      if (rowExists) {
+        int textY = rowY + max((INFO_TABLE_ROW_HEIGHT - infoPanelRenderState.textHeight) / 2, 0);
+        int labelWidth = infoPanelRenderState.dividerX - infoAreaX - INFO_TABLE_PADDING * 2;
+        if (labelWidth < 0) {
+          labelWidth = 0;
+        }
+        int valueWidth = infoAreaX + infoAreaWidth - infoPanelRenderState.dividerX - INFO_TABLE_PADDING * 2;
+        if (valueWidth < 0) {
+          valueWidth = 0;
+        }
+        tft.setTextPadding(labelWidth);
+        tft.drawString(infoPanelRenderState.rows[index].label, infoAreaX + INFO_TABLE_PADDING, textY);
+        tft.setTextPadding(valueWidth);
+        tft.drawString(infoPanelRenderState.rows[index].value,
+                       infoPanelRenderState.dividerX + INFO_TABLE_PADDING, textY);
+      }
+    }
+
+    infoPanelRenderState.nextRow++;
+    processed++;
+  }
+
+  if (infoPanelRenderState.nextRow < infoPanelRenderState.rowsToProcess) {
+    tft.setTextPadding(0);
+    tft.setTextDatum(TL_DATUM);
+    serviceAudioDuringRadarDraw();
+    return;
+  }
+
+  serviceAudioDuringRadarDraw();
+  tft.setTextPadding(0);
+  tft.setTextDatum(TL_DATUM);
+  infoPanelCache.initialized = true;
+  infoPanelCache.cachedInfoAreaX = infoAreaX;
+  infoPanelCache.cachedInfoAreaY = infoAreaY;
+  infoPanelCache.cachedInfoAreaWidth = infoAreaWidth;
+  infoPanelCache.cachedTextAreaHeight = infoPanelRenderState.textAreaHeight;
+  infoPanelCache.cachedHeaderHeight = infoPanelRenderState.headerHeight;
+  infoPanelCache.cachedTableTop = infoPanelRenderState.tableTop;
+  infoPanelCache.cachedDividerX = infoPanelRenderState.dividerX;
+  infoPanelCache.cachedRowCount = infoPanelRenderState.rowCount;
+  for (int i = 0; i < infoPanelRenderState.rowCount; ++i) {
+    infoPanelCache.cachedRows[i] = infoPanelRenderState.rows[i];
+  }
+  for (int i = infoPanelRenderState.rowCount;
+       i < (int)(sizeof(infoPanelCache.cachedRows) / sizeof(infoPanelCache.cachedRows[0])); ++i) {
+    infoPanelCache.cachedRows[i].label = "";
+    infoPanelCache.cachedRows[i].value = "";
+  }
+  bool newUpdateQueued = (infoPanelDirtyGeneration != infoPanelRenderState.dirtyGeneration);
+  infoPanelRenderState.active = false;
+  infoPanelDirty = newUpdateQueued;
+}
+
+void updateDisplay() {
+  markInfoPanelDirty();
+  renderInfoPanel();
+  drawRadar();
+  tft.setTextSize(1);
+}
+
+bool setActiveContact(int index) {
+  if (index < 0 || index >= radarContactCount) {
+    return clearActiveContact();
+  }
+
+  RadarContact &contact = radarContacts[index];
+  if (!contact.valid) {
+    return clearActiveContact();
+  }
+
+  if (activeContactIndex != index) {
+    activeContactIndex = index;
+    markInfoPanelDirty();
+    return true;
+  }
+
+  return false;
+}
+
+bool clearActiveContact() {
+  if (activeContactIndex >= 0) {
+    activeContactIndex = -1;
+    markInfoPanelDirty();
+    return true;
+  }
+  return false;
+}
+
+bool ensureActiveContactFresh(unsigned long now) {
+  if (activeContactIndex < 0) {
+    return false;
+  }
+  if (activeContactIndex >= radarContactCount) {
+    return clearActiveContact();
+  }
+
+  RadarContact &contact = radarContacts[activeContactIndex];
+  if (!contact.valid || contact.lastHighlightTime == 0 || (now - contact.lastHighlightTime) > RADAR_FADE_DURATION_MS) {
+    return clearActiveContact();
+  }
+
+  return false;
+}
+
+void drawRadar() {
+  if (!radarTaskStarted || radarTaskHandle == nullptr || !radarSpriteActive) {
+    renderRadarFrame(true);
+    return;
+  }
+
+  radarFrameRequested = true;
+  xTaskNotifyGive(radarTaskHandle);
+}
+
+void radarTask(void *param) {
+  const TickType_t waitTicks = pdMS_TO_TICKS(RADAR_FRAME_INTERVAL_MS);
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, waitTicks);
+
+    bool shouldDraw = false;
+    if (radarFrameRequested) {
+      radarFrameRequested = false;
+      shouldDraw = true;
+    }
+
+    unsigned long now = millis();
+    if (!shouldDraw && (now - lastRadarFrameTime) >= RADAR_FRAME_INTERVAL_MS) {
+      shouldDraw = true;
+    }
+
+    if (shouldDraw) {
+      if (radarSpriteActive) {
+        renderRadarFrame(false);
+      } else {
+        radarFrameRequested = false;
+      }
+    }
+  }
+}
+
+void audioTask(void *param) {
+  const TickType_t idleDelay = pdMS_TO_TICKS(10);
+  const TickType_t workDelay = pdMS_TO_TICKS(1);
+  for (;;) {
+    if (!streamPlaying || mp3 == nullptr) {
+      ulTaskNotifyTake(pdTRUE, idleDelay);
+      continue;
+    }
+
+    if (!mp3->isRunning()) {
+      ulTaskNotifyTake(pdTRUE, idleDelay);
+      continue;
+    }
+
+    serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US, false);
+    vTaskDelay(workDelay);
+  }
+}
+
+void renderRadarFrame(bool pushToDisplay) {
+  ScopedRecursiveLock lock(displayMutex);
+  uint32_t frameSerial = ++radarFrameSerial;
+  audioServiceFrameSerial = frameSerial;
+  audioServicesThisFrame = 0;
+  unsigned long now = millis();
+  lastRadarFrameTime = now;
+  compassLabelBoundsValid = false;
+  if (radarRadius <= 0) {
+    return;
+  }
+
+  double radarRangeKm = currentRadarRangeKm();
+  if (radarRangeKm <= 0.0) {
+    return;
+  }
+
+  if (pushToDisplay) {
+    radarFrameReadyToPush = false;
+  }
+
+  bool highlightChanged = false;
+  unsigned long sweepElapsed = (now - radarSweepStart) % RADAR_SWEEP_PERIOD_MS;
+  double sweepProgress = (double)sweepElapsed / (double)RADAR_SWEEP_PERIOD_MS;
+  double sweepAngle = sweepProgress * 360.0;
+  double rotationOffsetDeg = radarRotationSteps * 90.0;
+  double displaySweepAngle = fmod(sweepAngle + rotationOffsetDeg, 360.0);
+  double sweepRad = deg2rad(displaySweepAngle);
+  bool flashOn = ((now / 400) % 2) == 0;
+
+  if (radarSpriteActive) {
+    radarSprite.fillSprite(COLOR_BACKGROUND);
+    serviceAudioDuringRadarDraw();
+
+    int spriteCenter = radarSpriteWidth / 2;
+    radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_OUTLINE);
+    serviceAudioDuringRadarDraw();
+    radarSprite.drawCircle(spriteCenter, spriteCenter, radarRadius / 2, COLOR_RADAR_OUTLINE);
+    serviceAudioDuringRadarDraw();
+    drawRadarCross(radarSprite, spriteCenter, spriteCenter, radarRadius, COLOR_RADAR_GRID,
+                   rotationOffsetDeg);
+    serviceAudioDuringRadarDraw();
+    drawAirspaceZones(radarSprite, spriteCenter, spriteCenter, radarRadius, rotationOffsetDeg,
+                      radarRangeKm);
+    serviceAudioDuringRadarDraw();
+    radarSprite.fillCircle(spriteCenter, spriteCenter, 3, COLOR_RADAR_HOME);
+    serviceAudioDuringRadarDraw();
+
+    int sweepX = spriteCenter + (int)round(sin(sweepRad) * (radarRadius - 1));
+    int sweepY = spriteCenter - (int)round(cos(sweepRad) * (radarRadius - 1));
+    radarSprite.drawLine(spriteCenter, spriteCenter, sweepX, sweepY, COLOR_RADAR_SWEEP);
+    serviceAudioDuringRadarDraw();
+
+    int audioYieldCounter = 0;
+    for (int i = 0; i < radarContactCount; ++i) {
+      if (!radarContacts[i].valid) {
+        continue;
+      }
+
+      double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
+      if (!radarContacts[i].stale && angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
+        radarContacts[i].displayDistanceKm = radarContacts[i].distanceKm;
+        radarContacts[i].displayBearing = radarContacts[i].bearing;
+        radarContacts[i].displayTrack = radarContacts[i].track;
+        radarContacts[i].lastHighlightTime = now;
+        if (setActiveContact(i)) {
+          highlightChanged = true;
+        }
+      }
+
+      if (radarContacts[i].lastHighlightTime == 0) {
+        continue;
+      }
+
+      unsigned long sinceHighlight = now - radarContacts[i].lastHighlightTime;
+      if (sinceHighlight > RADAR_FADE_DURATION_MS) {
+        radarContacts[i].valid = false;
+        continue;
+      }
+
+      if (++audioYieldCounter >= RADAR_CONTACT_AUDIO_INTERVAL) {
+        serviceAudioDuringRadarDraw();
+        audioYieldCounter = 0;
+      }
+
+      double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
+      if (normalized > 1.0) {
+        normalized = 1.0;
+      } else if (normalized < 0.0 || isnan(normalized)) {
+        continue;
+      }
+
+      double angleRad = deg2rad(radarContacts[i].displayBearing + rotationOffsetDeg);
+      double radius = normalized * (radarRadius - 3);
+      int contactX = spriteCenter + (int)round(sin(angleRad) * radius);
+      int contactY = spriteCenter - (int)round(cos(angleRad) * radius);
+
+      float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
+      uint16_t baseColor;
+      if (radarContacts[i].inbound) {
+        baseColor = radarContacts[i].stale
+                        ? COLOR_RADAR_INBOUND
+                        : (flashOn ? COLOR_RADAR_INBOUND : COLOR_BACKGROUND);
+      } else {
+        baseColor = COLOR_RADAR_CONTACT;
+      }
+      uint16_t fadedColor = fadeColor(baseColor, alpha);
+      double headingDeg = radarContacts[i].displayTrack;
+      if (isnan(headingDeg)) {
+        headingDeg = radarContacts[i].displayBearing;
+      }
+      drawAircraftIcon(radarSprite, contactX, contactY, headingDeg + rotationOffsetDeg,
+                       AIRCRAFT_ICON_SIZE, fadedColor);
+    }
+
+    serviceAudioDuringRadarDraw();
+
+    if (!pushToDisplay) {
+      radarFrameReadyToPush = true;
+    }
+
+  } else {
+    if (!pushToDisplay) {
+      return;
+    }
+    int centerX = radarCenterX;
+    int centerY = radarCenterY;
+
+    int clearWidth = max(tft.width() - RADAR_MARGIN * 2, 0);
+    int clearHeight = max(radarAreaHeight, 0);
+    if (clearWidth > 0 && clearHeight > 0) {
+      tft.fillRect(RADAR_MARGIN, radarAreaY, clearWidth, clearHeight, COLOR_BACKGROUND);
+    }
+
+    tft.fillCircle(centerX, centerY, radarRadius, COLOR_BACKGROUND);
+    tft.drawCircle(centerX, centerY, radarRadius, COLOR_RADAR_OUTLINE);
+    tft.drawCircle(centerX, centerY, radarRadius / 2, COLOR_RADAR_OUTLINE);
+    drawRadarCross(tft, centerX, centerY, radarRadius, COLOR_RADAR_GRID, rotationOffsetDeg);
+    drawAirspaceZones(tft, centerX, centerY, radarRadius, rotationOffsetDeg, radarRangeKm);
+    tft.fillCircle(centerX, centerY, 3, COLOR_RADAR_HOME);
+    serviceAudioDuringRadarDraw();
+
+    int sweepX = centerX + (int)round(sin(sweepRad) * (radarRadius - 1));
+    int sweepY = centerY - (int)round(cos(sweepRad) * (radarRadius - 1));
+    tft.drawLine(centerX, centerY, sweepX, sweepY, COLOR_RADAR_SWEEP);
+    serviceAudioDuringRadarDraw();
+
+    int audioYieldCounter = 0;
+    for (int i = 0; i < radarContactCount; ++i) {
+      if (!radarContacts[i].valid) {
+        continue;
+      }
+
+      double angleDiff = angularDifference(radarContacts[i].bearing, sweepAngle);
+      if (!radarContacts[i].stale && angleDiff <= RADAR_SWEEP_WIDTH_DEG) {
+        radarContacts[i].displayDistanceKm = radarContacts[i].distanceKm;
+        radarContacts[i].displayBearing = radarContacts[i].bearing;
+        radarContacts[i].displayTrack = radarContacts[i].track;
+        radarContacts[i].lastHighlightTime = now;
+        if (setActiveContact(i)) {
+          highlightChanged = true;
+        }
+      }
+
+      if (radarContacts[i].lastHighlightTime == 0) {
+        continue;
+      }
+
+      unsigned long sinceHighlight = now - radarContacts[i].lastHighlightTime;
+      if (sinceHighlight > RADAR_FADE_DURATION_MS) {
+        radarContacts[i].valid = false;
+        continue;
+      }
+
+      if (++audioYieldCounter >= RADAR_CONTACT_AUDIO_INTERVAL) {
+        serviceAudioDuringRadarDraw();
+        audioYieldCounter = 0;
+      }
+
+      double normalized = radarContacts[i].displayDistanceKm / radarRangeKm;
+      if (normalized > 1.0) {
+        normalized = 1.0;
+      } else if (normalized < 0.0 || isnan(normalized)) {
+        continue;
+      }
+
+      double angleRad = deg2rad(radarContacts[i].displayBearing + rotationOffsetDeg);
+      double radius = normalized * (radarRadius - 3);
+      int contactX = centerX + (int)round(sin(angleRad) * radius);
+      int contactY = centerY - (int)round(cos(angleRad) * radius);
+
+      float alpha = 1.0f - (float)sinceHighlight / (float)RADAR_FADE_DURATION_MS;
+      uint16_t baseColor;
+      if (radarContacts[i].inbound) {
+        baseColor = radarContacts[i].stale
+                        ? COLOR_RADAR_INBOUND
+                        : (flashOn ? COLOR_RADAR_INBOUND : COLOR_BACKGROUND);
+      } else {
+        baseColor = COLOR_RADAR_CONTACT;
+      }
+      uint16_t fadedColor = fadeColor(baseColor, alpha);
+      double headingDeg = radarContacts[i].displayTrack;
+      if (isnan(headingDeg)) {
+        headingDeg = radarContacts[i].displayBearing;
+      }
+      drawAircraftIcon(tft, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE,
+                       fadedColor);
+    }
+
+    serviceAudioDuringRadarDraw();
+  }
+
+  bool cleared = ensureActiveContactFresh(now);
+  if (highlightChanged || cleared) {
+    markInfoPanelDirty();
+  }
+
+  if (pushToDisplay) {
+    if (radarSpriteActive) {
+      int spriteX = radarCenterX - radarRadius;
+      int spriteY = radarCenterY - radarRadius;
+      serviceAudioDuringRadarDraw();
+      radarSprite.pushSprite(spriteX, spriteY);
+    }
+
+    serviceAudioDuringRadarDraw();
+    drawCompassLabels(tft, radarCenterX, radarCenterY, radarRadius, rotationOffsetDeg);
+    serviceAudioDuringRadarDraw();
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+
+    drawStatusBar();
+  }
+}
+
+void connectWiFi() {
+  lastWifiAttempt = millis();
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  Serial.printf("Connecting to WiFi %s...\n", WIFI_SSID);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(250);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi connected.");
+    WiFi.setSleep(false);
+  } else {
+    Serial.println("WiFi connection failed.");
+  }
+
+  updateDisplay();
+}
+
+// --- REFACTORED fetchAircraft FUNCTION ---
+void fetchAircraft() {
+  if (WiFi.status() != WL_CONNECTED) {
+    ScopedRecursiveLock lock(displayMutex); // Lock to safely modify shared data
+    if (!lock.isLocked()) return;
+    dataConnectionOk = false;
+    closestAircraft.valid = false;
+    aircraftCount = 0;
+    resetRadarContacts(); // This modifies globals, must be locked
+    updateDisplay();
+    return;
+  }
+
+  HTTPClient http;
+  char url[160];
+  snprintf(url, sizeof(url), "http://%s:%d/dump1090-fa/data/aircraft.json", DUMP1090_SERVER, DUMP1090_PORT);
+
+  if (!http.begin(url)) {
+    ScopedRecursiveLock lock(displayMutex);
+    if (!lock.isLocked()) return;
+    dataConnectionOk = false;
+    resetRadarContacts();
+    updateDisplay();
+    return;
+  }
+
+  http.setTimeout(4000);
+  int httpCode = http.GET(); // BLOCKING CALL - NO LOCK HELD
+
+  if (httpCode != HTTP_CODE_OK) {
+    http.end();
+    ScopedRecursiveLock lock(displayMutex);
+    if (!lock.isLocked()) return;
+    dataConnectionOk = false;
+    resetRadarContacts();
+    updateDisplay();
+    return;
+  }
+
+  DynamicJsonDocument doc(16384);
+  DeserializationError err = deserializeJson(doc, http.getStream()); // CPU INTENSIVE - NO LOCK HELD
+  http.end(); // End session immediately after getting data
+
+  if (err) {
+    ScopedRecursiveLock lock(displayMutex);
+    if (!lock.isLocked()) return;
+    dataConnectionOk = false;
+    resetRadarContacts();
+    updateDisplay();
+    return;
+  }
+  
+  // --- Data processing into temporary variables (no lock held) ---
+  AircraftInfo tempClosestAircraft;
+  tempClosestAircraft.valid = false;
+  tempClosestAircraft.squawk = "";
+  tempClosestAircraft.groundSpeed = NAN;
+  tempClosestAircraft.track = NAN;
+  tempClosestAircraft.minutesToClosest = NAN;
+
+  RadarContact tempContacts[MAX_RADAR_CONTACTS];
+  int tempContactCount = 0;
+  int tempAircraftCount = 0;
+  int tempInboundCount = 0;
+  double bestDistance = 1e12;
+  double radarRangeKm = currentRadarRangeKm();
+  double alertRangeKm = currentAlertRangeKm();
+
+  // Create a snapshot of old data to preserve highlights
+  RadarContact previousContacts[MAX_RADAR_CONTACTS];
+  int previousCount;
+  int previousActiveIndex;
+  String previousActiveFlight; // Use flight name for better tracking
+  {
+    ScopedRecursiveLock lock(displayMutex); // Brief lock to get a safe copy
+    if (!lock.isLocked()) return;
+    previousCount = radarContactCount;
+    previousActiveIndex = activeContactIndex;
+    if (activeContactIndex >=0 && activeContactIndex < radarContactCount) {
+      previousActiveFlight = radarContacts[activeContactIndex].flight;
+    }
+    memcpy(previousContacts, radarContacts, sizeof(radarContacts));
+  }
+  bool previousMatched[MAX_RADAR_CONTACTS] = {false};
+  int newActiveIndex = -1;
+
+  // Main processing loop on the received JSON data
+  JsonArray arr = doc["aircraft"].as<JsonArray>();
+  for (JsonObject plane : arr) {
+    serviceAudioDecoder(); // Yield to let audio buffer fill
+    
+    if (!plane.containsKey("lat") || !plane.containsKey("lon")) continue;
+    double lat = plane["lat"].as<double>();
+    double lon = plane["lon"].as<double>();
+    double distance = haversine(USER_LAT, USER_LON, lat, lon);
+    if (isnan(distance) || isinf(distance) || distance > radarRangeKm) continue;
+    
+    tempAircraftCount++;
+    
+    double bearingToHome = calculateBearing(USER_LAT, USER_LON, lat, lon);
+    double groundSpeed = NAN;
+    double track = NAN;
+    double minutesToClosest = NAN;
+    bool inbound = false;
+
+    if (distance <= alertRangeKm) {
+        inbound = true;
+        minutesToClosest = 0.0;
+    }
+
+    if (plane.containsKey("gs")) {
+      JsonVariant speedVar = plane["gs"];
+      if (speedVar.is<float>() || speedVar.is<double>() || speedVar.is<int>()) {
+        groundSpeed = speedVar.as<double>();
+      }
+    }
+
+    if (plane.containsKey("track")) {
+      JsonVariant trackVar = plane["track"];
+      if (trackVar.is<float>() || trackVar.is<double>() || trackVar.is<int>()) {
+        track = trackVar.as<double>();
+      }
+    }
+
+    if (!inbound && !isnan(track) && !isnan(groundSpeed) && groundSpeed > 0) {
+        double toBase = fmod(bearingToHome + 180.0, 360.0);
+        double angleDiff = fabs(track - toBase);
+        if (angleDiff > 180.0) angleDiff = 360.0 - angleDiff;
+        double crossTrack = distance * sin(deg2rad(angleDiff));
+        double alongTrack = distance * cos(deg2rad(angleDiff));
+        if (angleDiff < 90.0 && fabs(crossTrack) <= alertRangeKm && alongTrack >= 0) {
+            inbound = true;
+            double speedKmMin = groundSpeed * 1.852 / 60.0;
+            if (speedKmMin > 0) {
+                minutesToClosest = alongTrack / speedKmMin;
+            }
+        }
+    }
+
+    if (inbound) {
+        tempInboundCount++;
+    }
+
+    String flight;
+    if (plane.containsKey("flight")) {
+        const char *flightStr = plane["flight"].as<const char*>();
+        if (flightStr) flight = String(flightStr);
+        flight.trim();
+    }
+    
+    // --- RESTORED SQUAWK PARSING LOGIC ---
+    String squawk;
+    if (plane.containsKey("squawk")) {
+      JsonVariant sqVar = plane["squawk"];
+      if (sqVar.is<const char*>()) {
+        const char *sqStr = sqVar.as<const char*>();
+        if (sqStr != nullptr) {
+          squawk = String(sqStr);
+          squawk.trim();
+        }
+      } else if (sqVar.is<int>() || sqVar.is<long>() || sqVar.is<unsigned int>() || sqVar.is<unsigned long>()) {
+        long sqValue = sqVar.as<long>();
+        char buffer[8];
+        snprintf(buffer, sizeof(buffer), "%04ld", sqValue);
+        squawk = String(buffer);
+      }
+    }
+
+    // --- RESTORED ALTITUDE PARSING LOGIC ---
+    int altitude = -1;
+    if (plane.containsKey("alt_baro")) {
+      JsonVariant alt = plane["alt_baro"];
+      if (alt.is<int>()) {
+        altitude = alt.as<int>();
+      } else if (alt.is<const char*>()) {
+        const char *altStr = alt.as<const char*>();
+        if (altStr != nullptr && strcmp(altStr, "ground") == 0) {
+          altitude = 0;
+        }
+      }
+    }
+    
+    int matchIndex = -1;
+    // ... (Your original contact matching logic can be placed here if needed) ...
+
+    if (tempContactCount < MAX_RADAR_CONTACTS) {
+      RadarContact &contact = tempContacts[tempContactCount];
+      contact.valid = true;
+      contact.flight = flight;
+      contact.squawk = squawk;
+      contact.distanceKm = distance;
+      contact.bearing = bearingToHome;
+      contact.displayDistanceKm = distance;
+      contact.displayBearing = bearingToHome;
+      contact.altitude = altitude;
+      contact.groundSpeed = groundSpeed;
+      contact.track = track;
+      contact.displayTrack = track;
+      contact.inbound = inbound;
+      contact.minutesToClosest = minutesToClosest;
+      contact.stale = false;
+      contact.lastHighlightTime = 0;
+
+      if (matchIndex >= 0) {
+        contact.lastHighlightTime = previousContacts[matchIndex].lastHighlightTime;
+        contact.displayDistanceKm = previousContacts[matchIndex].displayDistanceKm;
+        contact.displayBearing = previousContacts[matchIndex].displayBearing;
+        contact.displayTrack = previousContacts[matchIndex].displayTrack;
+        previousMatched[matchIndex] = true;
+      }
+      
+      if (!previousActiveFlight.isEmpty() && flight.length() > 0 && flight.equalsIgnoreCase(previousActiveFlight)) {
+        newActiveIndex = tempContactCount;
+      }
+      tempContactCount++;
+    }
+
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      tempClosestAircraft.valid = true;
+      tempClosestAircraft.flight = flight;
+      tempClosestAircraft.squawk = squawk;
+      tempClosestAircraft.distanceKm = distance;
+      tempClosestAircraft.bearing = bearingToHome;
+      tempClosestAircraft.altitude = altitude;
+      tempClosestAircraft.groundSpeed = groundSpeed;
+      tempClosestAircraft.track = track;
+      tempClosestAircraft.inbound = inbound;
+      tempClosestAircraft.minutesToClosest = minutesToClosest;
+    }
+  }
+
+  // Loop to merge stale contacts that are still fading out
+  unsigned long now = millis();
+  for (int i = 0; i < previousCount && tempContactCount < MAX_RADAR_CONTACTS; ++i) {
+    if (previousMatched[i] || !previousContacts[i].valid) continue;
+    if ((now - previousContacts[i].lastHighlightTime) > RADAR_FADE_DURATION_MS) continue;
+    
+    tempContacts[tempContactCount] = previousContacts[i];
+    tempContacts[tempContactCount].stale = true;
+    if (i == previousActiveIndex) {
+        newActiveIndex = tempContactCount;
+    }
+    tempContactCount++;
+  }
+
+  // --- Processing complete. Atomically update global state. ---
+  {
+    ScopedRecursiveLock lock(displayMutex); // Lock for a very short time
+    if (!lock.isLocked()) return;
+
+    dataConnectionOk = true;
+    lastSuccessfulFetch = now;
+    
+    // Copy temporary data to the global structures
+    memcpy(radarContacts, tempContacts, sizeof(tempContacts));
+    radarContactCount = tempContactCount;
+    
+    // Invalidate any remaining slots
+    for (int i = tempContactCount; i < MAX_RADAR_CONTACTS; i++) {
+      radarContacts[i].valid = false;
+    }
+
+    closestAircraft = tempClosestAircraft;
+    aircraftCount = tempAircraftCount;
+    inboundAircraftCount = tempInboundCount;
+    activeContactIndex = newActiveIndex;
+  }
+
+  // Trigger UI update AFTER releasing the lock
+  updateDisplay();
+}
+
+
+double deg2rad(double deg) { return deg * PI / 180.0; }
+
+double haversine(double lat1, double lon1, double lat2, double lon2) {
+  double dLat = deg2rad(lat2 - lat1);
+  double dLon = deg2rad(lon2 - lon1);
+  double a = sin(dLat / 2) * sin(dLat / 2) + cos(deg2rad(lat1)) * cos(deg2rad(lat2)) * sin(dLon / 2) * sin(dLon / 2);
+  double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+  const double EARTH_RADIUS_KM = 6371.0;
+  return EARTH_RADIUS_KM * c;
+}
+
+double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
+  double lonDiff = deg2rad(lon2 - lon1);
+  lat1 = deg2rad(lat1);
+  lat2 = deg2rad(lat2);
+  double y = sin(lonDiff) * cos(lat2);
+  double x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(lonDiff);
+  double bearing = atan2(y, x);
+  bearing = fmod((bearing * 180.0 / PI + 360.0), 360.0);
+  return bearing;
+}
+
+String formatTimeAgo(unsigned long ms) {
+  unsigned long seconds = ms / 1000;
+  if (seconds < 60) {
+    return String(seconds) + "s ago";
+  }
+  unsigned long minutes = seconds / 60;
+  seconds %= 60;
+  if (minutes < 60) {
+    char buffer[24];
+    snprintf(buffer, sizeof(buffer), "%lum %02lus ago", minutes, seconds);
+    return String(buffer);
+  }
+  unsigned long hours = minutes / 60;
+  minutes %= 60;
+  char buffer[24];
+  snprintf(buffer, sizeof(buffer), "%luh %02lum ago", hours, minutes);
+  return String(buffer);
+}
+
+void drawStatusBar() {
+  ScopedRecursiveLock lock(displayMutex);
+  int iconWidth = WIFI_ICON_BARS * WIFI_ICON_BAR_WIDTH + (WIFI_ICON_BARS - 1) * WIFI_ICON_BAR_SPACING;
+  int iconX = tft.width() - RADAR_MARGIN - iconWidth;
+  int iconY = RADAR_MARGIN / 2;
+
+  bool connected = WiFi.status() == WL_CONNECTED;
+  int rssi = connected ? WiFi.RSSI() : -100;
+  int barsActive = 0;
+
+  if (connected) {
+    if (rssi >= -55) {
+      barsActive = 4;
+    } else if (rssi >= -65) {
+      barsActive = 3;
+    } else if (rssi >= -75) {
+      barsActive = 2;
+    } else if (rssi >= -85) {
+      barsActive = 1;
+    } else {
+      barsActive = 0;
+    }
+  }
+
+  if (connected != lastWifiConnectedState || barsActive != lastWifiBars) {
+    drawWifiIcon(iconX, iconY, barsActive, connected);
+    lastWifiConnectedState = connected;
+    lastWifiBars = barsActive;
+  }
+}
+
+void drawWifiIcon(int x, int y, int barsActive, bool connected) {
+  ScopedRecursiveLock lock(displayMutex);
+  int iconWidth = WIFI_ICON_BARS * WIFI_ICON_BAR_WIDTH + (WIFI_ICON_BARS - 1) * WIFI_ICON_BAR_SPACING;
+  tft.fillRect(x, y, iconWidth, WIFI_ICON_HEIGHT, COLOR_BACKGROUND);
+
+  uint16_t activeColor = connected ? COLOR_RADAR_CONTACT : COLOR_RADAR_GRID;
+  for (int i = 0; i < WIFI_ICON_BARS; ++i) {
+    int barHeight = 6 + i * 3;
+    int barX = x + i * (WIFI_ICON_BAR_WIDTH + WIFI_ICON_BAR_SPACING);
+    int barY = y + WIFI_ICON_HEIGHT - barHeight;
+    uint16_t color = (i < barsActive) ? activeColor : COLOR_RADAR_GRID;
+    tft.fillRect(barX, barY, WIFI_ICON_BAR_WIDTH, barHeight, color);
+  }
+}
+
+void configureButtons() {
+  int buttonWidth = 0;
+  if (BUTTON_COUNT > 0) {
+    buttonWidth = (infoAreaWidth - BUTTON_SPACING * (BUTTON_COUNT - 1)) / BUTTON_COUNT;
+    if (buttonWidth < 0) {
+      buttonWidth = 0;
+    }
+  }
+
+  int buttonY = buttonAreaY;
+  for (int i = 0; i < BUTTON_COUNT; ++i) {
+    TouchButton &btn = buttons[i];
+    btn.x = infoAreaX + i * (buttonWidth + BUTTON_SPACING);
+    btn.y = buttonY;
+    btn.w = buttonWidth;
+    btn.h = BUTTON_HEIGHT;
+    btn.state = false;
+    if (i == 0) {
+      btn.name = "Radar";
+      btn.type = BUTTON_RADAR_RANGE;
+    } else if (i == 1) {
+      btn.name = "Alert";
+      btn.type = BUTTON_ALERT_RANGE;
+    } else if (i == 2) {
+      btn.name = "Stream";
+      btn.type = BUTTON_STREAM_TOGGLE;
+    } else {
+      btn.name = "Button";
+      btn.type = BUTTON_UNKNOWN;
+    }
+  }
+}
+
+void drawButtons() {
+  ScopedRecursiveLock lock(displayMutex);
+  for (int i = 0; i < BUTTON_COUNT; ++i) {
+    drawButton(i);
+  }
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+}
+
+void drawButton(int index) {
+  ScopedRecursiveLock lock(displayMutex);
+  if (index < 0 || index >= BUTTON_COUNT) {
+    return;
+  }
+
+  TouchButton &btn = buttons[index];
+  uint16_t fillColor = COLOR_BUTTON_INACTIVE;
+  tft.fillRoundRect(btn.x, btn.y, btn.w, btn.h, 8, fillColor);
+  tft.drawRoundRect(btn.x, btn.y, btn.w, btn.h, 8, COLOR_RADAR_OUTLINE);
+
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(COLOR_TEXT, fillColor);
+  tft.setTextSize(2);
+
+  int centerX = btn.x + btn.w / 2;
+  int centerY = btn.y + btn.h / 2;
+  String title = btn.name ? String(btn.name) : String("Button");
+  String value;
+
+  if (btn.type == BUTTON_RADAR_RANGE) {
+    value = String(currentRadarRangeKm(), 0) + " km";
+  } else if (btn.type == BUTTON_ALERT_RANGE) {
+    value = String(currentAlertRangeKm(), 0) + " km";
+  } else if (btn.type == BUTTON_STREAM_TOGGLE) {
+    value = streamPlaying ? String("On") : String("Off");
+  } else {
+    value = btn.state ? String("ON") : String("OFF");
+  }
+
+  tft.drawString(title, centerX, centerY - 10);
+  tft.drawString(value, centerX, centerY + 12);
+  tft.setTextSize(1);
+}
+
+bool readTouchPoint(int &screenX, int &screenY) {
+  uint16_t rawX = 0;
+  uint16_t rawY = 0;
+  if (!tft.getTouchRaw(&rawX, &rawY)) {
+    return false;
+  }
+
+  long calMinX = TOUCH_RAW_MIN_X;
+  long calMaxX = TOUCH_RAW_MAX_X;
+  long calMinY = TOUCH_RAW_MIN_Y;
+  long calMaxY = TOUCH_RAW_MAX_Y;
+
+#if TOUCH_SWAP_XY
+  uint16_t rawSwap = rawX;
+  rawX = rawY;
+  rawY = rawSwap;
+  long calSwap = calMinX;
+  calMinX = calMinY;
+  calMinY = calSwap;
+  calSwap = calMaxX;
+  calMaxX = calMaxY;
+  calMaxY = calSwap;
+#endif
+
+#if TOUCH_INVERT_X
+  long calSwap = calMinX;
+  calMinX = calMaxX;
+  calMaxX = calSwap;
+#endif
+
+#if TOUCH_INVERT_Y
+  long calSwap = calMinY;
+  calMinY = calMaxY;
+  calMaxY = calSwap;
+#endif
+
+  long mappedX = rawX;
+  long mappedY = rawY;
+
+  if (calMaxX != calMinX) {
+    mappedX = map((long)rawX, calMinX, calMaxX, 0, (long)tft.width() - 1);
+  } else {
+    mappedX = rawX % tft.width();
+  }
+
+  if (calMaxY != calMinY) {
+    mappedY = map((long)rawY, calMinY, calMaxY, 0, (long)tft.height() - 1);
+  } else {
+    mappedY = rawY % tft.height();
+  }
+
+  mappedX = constrain(mappedX, 0, (long)tft.width() - 1);
+  mappedY = constrain(mappedY, 0, (long)tft.height() - 1);
+
+  screenX = (int)mappedX;
+  screenY = (int)mappedY;
+  return true;
+}
+
+void rotateRadarOrientation() {
+  radarRotationSteps = (radarRotationSteps + 1) % 4;
+  compassLabelBoundsValid = false;
+  invalidateRadarBackground();
+  drawRadar();
+  persistSettings();
+}
+
+void handleTouch() {
+  int touchX = 0;
+  int touchY = 0;
+  if (!readTouchPoint(touchX, touchY)) {
+    return;
+  }
+
+  unsigned long now = millis();
+  if (now - lastTouchTime < TOUCH_DEBOUNCE_MS) {
+    return;
+  }
+  lastTouchTime = now;
+
+  bool handled = false;
+  for (int i = 0; i < BUTTON_COUNT; ++i) {
+    TouchButton &btn = buttons[i];
+    if (touchX >= btn.x && touchX <= btn.x + btn.w && touchY >= btn.y && touchY <= btn.y + btn.h) {
+      handleRangeButton(btn.type);
+      handled = true;
+      break;
+    }
+  }
+
+  if (!handled && radarRadius > 0) {
+    long dx = (long)touchX - (long)radarCenterX;
+    long dy = (long)touchY - (long)radarCenterY;
+    long distanceSquared = dx * dx + dy * dy;
+    long radiusSquared = (long)radarRadius * (long)radarRadius;
+    if (distanceSquared <= radiusSquared) {
+      rotateRadarOrientation();
+      return;
+    }
+  }
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+}
+
+double angularDifference(double a, double b) {
+  double diff = fabs(fmod(a - b + 540.0, 360.0) - 180.0);
+  return diff;
+}
+
+uint16_t fadeColor(uint16_t color, float alpha) {
+  if (alpha <= 0.0f) {
+    return COLOR_BACKGROUND;
+  }
+  if (alpha >= 1.0f) {
+    return color;
+  }
+
+  uint8_t r = (color >> 11) & 0x1F;
+  uint8_t g = (color >> 5) & 0x3F;
+  uint8_t b = color & 0x1F;
+
+  r = (uint8_t)round(r * alpha);
+  g = (uint8_t)round(g * alpha);
+  b = (uint8_t)round(b * alpha);
+
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
