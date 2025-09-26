@@ -171,6 +171,11 @@ struct AirspaceZone {
 
 static const int AIRSPACE_LABEL_TEXT_SIZE = 1;
 
+// Reuse a single JSON document to avoid heap fragmentation from repeated
+// DynamicJsonDocument allocations while the audio stream is active.
+static const size_t AIRCRAFT_JSON_DOC_CAPACITY = 16384;
+static StaticJsonDocument<AIRCRAFT_JSON_DOC_CAPACITY> aircraftJsonDoc;
+
 static const AirspaceZone AIRSPACE_ZONES[] = {
     // Approximate airport control zones drawn with a 10 NM (~18.5 km) radius
     {"Teesside", "MME", 54.509189, -1.429406, 18.5},
@@ -978,7 +983,10 @@ void setup() {
   drawStaticLayout();
 
   closestAircraft.valid = false;
+  closestAircraft.flight = "";
   closestAircraft.squawk = "";
+  closestAircraft.flight.reserve(16);  // Avoid repeated allocations during updates
+  closestAircraft.squawk.reserve(8);
   updateDisplay();
 
   BaseType_t radarTaskStatus = xTaskCreatePinnedToCore(
@@ -1145,6 +1153,7 @@ void resetRadarContacts() {
   for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
     radarContacts[i].valid = false;
     radarContacts[i].flight = "";
+    radarContacts[i].flight.reserve(16);  // Reserve buffers once to reduce heap churn
     radarContacts[i].lastHighlightTime = 0;
     radarContacts[i].inbound = false;
     radarContacts[i].distanceKm = 0.0;
@@ -1158,6 +1167,7 @@ void resetRadarContacts() {
     radarContacts[i].displayTrack = NAN;
     radarContacts[i].minutesToClosest = NAN;
     radarContacts[i].squawk = "";
+    radarContacts[i].squawk.reserve(8);  // Keep a small buffer ready for future updates
   }
   activeContactIndex = -1;
   markInfoPanelDirty();
@@ -1956,8 +1966,8 @@ void fetchAircraft() {
     return;
   }
 
-  DynamicJsonDocument doc(16384);
-  DeserializationError err = deserializeJson(doc, http.getStream()); // CPU INTENSIVE - NO LOCK HELD
+  aircraftJsonDoc.clear();
+  DeserializationError err = deserializeJson(aircraftJsonDoc, http.getStream()); // CPU INTENSIVE - NO LOCK HELD
   http.end(); // End session immediately after getting data
 
   if (err) {
@@ -2004,9 +2014,9 @@ void fetchAircraft() {
   int newActiveIndex = -1;
 
   // Main processing loop on the received JSON data
-  JsonArray arr = doc["aircraft"].as<JsonArray>();
+  JsonArray arr = aircraftJsonDoc["aircraft"].as<JsonArray>();
   for (JsonObject plane : arr) {
-    serviceAudioDecoder(); // Yield to let audio buffer fill
+    serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US / 2, true); // Opportunistic audio servicing without blocking
     
     if (!plane.containsKey("lat") || !plane.containsKey("lon")) continue;
     double lat = plane["lat"].as<double>();
