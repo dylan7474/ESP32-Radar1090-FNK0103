@@ -2065,9 +2065,6 @@ void fetchAircraft() {
     http.end(); // End session immediately after getting data
 
     if (err) {
-      if (streamPlaying) {
-        purgeAircraftJsonDocumentLocked();
-      }
       ScopedRecursiveLock lock(displayMutex);
       if (!lock.isLocked()) return;
       dataConnectionOk = false;
@@ -2222,9 +2219,6 @@ void fetchAircraft() {
       }
     }
 
-    if (streamPlaying) {
-      purgeAircraftJsonDocumentLocked();
-    }
   }
 
   // Loop to merge stale contacts that are still fading out
