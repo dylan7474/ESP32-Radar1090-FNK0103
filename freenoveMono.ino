@@ -24,7 +24,7 @@ static const uint16_t COLOR_SCOPE_GREEN_PRIMARY = 0x03E0;  // Bright vector elem
 static const uint16_t COLOR_SCOPE_GREEN_DIM = 0x0260;       // Gridlines and muted UI
 static const uint16_t COLOR_SCOPE_GREEN_FAINT = 0x0140;     // Background fills and shading
 
-static const uint16_t COLOR_BACKGROUND = COLOR_SCOPE_GREEN_FAINT;
+static const uint16_t COLOR_BACKGROUND = TFT_BLACK;          // Fully black backdrop for classic scope contrast
 static const uint16_t COLOR_TEXT = COLOR_SCOPE_GREEN_PRIMARY;
 static const uint16_t COLOR_RADAR_OUTLINE = COLOR_SCOPE_GREEN_PRIMARY;
 static const uint16_t COLOR_RADAR_GRID = COLOR_SCOPE_GREEN_DIM;
@@ -32,7 +32,7 @@ static const uint16_t COLOR_RADAR_CONTACT = COLOR_SCOPE_GREEN_PRIMARY;
 static const uint16_t COLOR_RADAR_INBOUND = COLOR_SCOPE_GREEN_PRIMARY;      // Monochrome contact highlight
 static const uint16_t COLOR_RADAR_HOME = COLOR_SCOPE_GREEN_DIM;             // Dim marker for home position
 static const uint16_t COLOR_AIRSPACE = COLOR_SCOPE_GREEN_DIM;               // Muted boundary accents
-static const uint16_t COLOR_INFO_TABLE_BG = COLOR_SCOPE_GREEN_FAINT;
+static const uint16_t COLOR_INFO_TABLE_BG = TFT_BLACK;
 static const uint16_t COLOR_INFO_TABLE_HEADER_BG = COLOR_SCOPE_GREEN_DIM;
 static const uint16_t COLOR_INFO_TABLE_BORDER = COLOR_SCOPE_GREEN_PRIMARY;
 static const int INFO_TEXT_SIZE = 2;
