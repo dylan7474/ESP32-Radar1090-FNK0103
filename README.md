@@ -9,6 +9,7 @@ An Arduino-compatible sketch for the Freenove ESP32 4.0" display board (FNK0103)
 - **Detail panel** that caches and redraws only the rows that change, showing callsign, speed, distance, altitude, squawk and traffic counts.
 - **Touch controls** to cycle radar range, adjust the alert radius, rotate the radar orientation and select contacts, with settings persisted to EEPROM.
 - **Dump1090 integration** via `aircraft.json`, including smoothing so recently seen targets fade out rather than disappearing abruptly.
+- **Dedicated FreeRTOS tasks** for radar rendering, audio streaming and aircraft data fetching so visual updates, WiFi requests and the MP3 decoder never block one another.
 
 ## Required Libraries
 
@@ -43,7 +44,17 @@ The sketch targets the Freenove FNK0103 kit where the ESP32, TFT backplane and t
 - Tap the **Radar** button to cycle the display range (5 km → 300 km). Tap the **Alert** button to change the inbound alert radius (1 km → 10 km).
 - Tapping inside the radar face rotates the compass orientation in 90° steps—handy if you want north-up, track-up or any of the four quadrants.
 - Connection, WiFi strength, fetch timing and inbound counts are summarised near the bottom of the display.
-- Aircraft distance, bearing, altitude, track and estimated arrival (for inbound flights) refresh every five seconds while the ESP32 maintains a WiFi link to the dump1090 server. Alert/range selections and orientation are saved to EEPROM so they persist across reboots.
+- Aircraft distance, bearing, altitude, track and estimated arrival (for inbound flights) refresh every five seconds while the ESP32 maintains a WiFi link to the dump1090 server. The aircraft fetcher runs on its own FreeRTOS task, so network latency never stalls the UI or the audio stream. Alert/range selections and orientation are saved to EEPROM so they persist across reboots.
+
+### Task Architecture
+
+The sketch relies on three cooperating FreeRTOS tasks plus the lightweight `loop()` shim:
+
+- **Radar task** (core 0) builds each sweep in an off-screen sprite, then pushes frames to the TFT while yielding regularly to the audio helper so animations stay fluid.
+- **Aircraft data task** (core 0) wakes every five seconds or when notified after WiFi connects, performs the blocking HTTP/JSON work, and publishes results into shared structures.
+- **Audio task** (core 1) services the MP3 decoder and I2S sink in small slices, protecting shared decoder state with a mutex so it can also run from the main loop when needed.
+
+`loop()` now focuses on housekeeping—watching WiFi status, presenting completed radar frames, rendering the info panel and forwarding touch input. Because the heavy operations live on dedicated tasks with explicit synchronisation, WiFi fetches, radar drawing and streaming audio no longer contend with one another.
 
 ### Touch Calibration
 
