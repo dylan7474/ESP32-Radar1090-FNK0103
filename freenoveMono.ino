@@ -20,17 +20,21 @@
 
 // --- Display & Timing Constants ---
 // This variant applies a monochrome green palette to mimic a traditional radar scope.
-static const uint16_t COLOR_BACKGROUND = TFT_BLACK;
-static const uint16_t COLOR_TEXT = TFT_GREEN;
-static const uint16_t COLOR_RADAR_OUTLINE = TFT_GREEN;
-static const uint16_t COLOR_RADAR_GRID = TFT_DARKGREEN;
-static const uint16_t COLOR_RADAR_CONTACT = TFT_GREEN;
-static const uint16_t COLOR_RADAR_INBOUND = 0x05E0;      // Medium green for inbound targets
-static const uint16_t COLOR_RADAR_HOME = 0x03E0;         // Dim green marker for home position
-static const uint16_t COLOR_AIRSPACE = 0x02C0;           // Muted green boundary accents
-static const uint16_t COLOR_INFO_TABLE_BG = TFT_BLACK;
-static const uint16_t COLOR_INFO_TABLE_HEADER_BG = 0x0400;
-static const uint16_t COLOR_INFO_TABLE_BORDER = TFT_GREEN;
+static const uint16_t COLOR_SCOPE_GREEN_PRIMARY = 0x03E0;  // Bright vector elements
+static const uint16_t COLOR_SCOPE_GREEN_DIM = 0x0260;       // Gridlines and muted UI
+static const uint16_t COLOR_SCOPE_GREEN_FAINT = 0x0140;     // Background fills and shading
+
+static const uint16_t COLOR_BACKGROUND = COLOR_SCOPE_GREEN_FAINT;
+static const uint16_t COLOR_TEXT = COLOR_SCOPE_GREEN_PRIMARY;
+static const uint16_t COLOR_RADAR_OUTLINE = COLOR_SCOPE_GREEN_PRIMARY;
+static const uint16_t COLOR_RADAR_GRID = COLOR_SCOPE_GREEN_DIM;
+static const uint16_t COLOR_RADAR_CONTACT = COLOR_SCOPE_GREEN_PRIMARY;
+static const uint16_t COLOR_RADAR_INBOUND = COLOR_SCOPE_GREEN_PRIMARY;      // Monochrome contact highlight
+static const uint16_t COLOR_RADAR_HOME = COLOR_SCOPE_GREEN_DIM;             // Dim marker for home position
+static const uint16_t COLOR_AIRSPACE = COLOR_SCOPE_GREEN_DIM;               // Muted boundary accents
+static const uint16_t COLOR_INFO_TABLE_BG = COLOR_SCOPE_GREEN_FAINT;
+static const uint16_t COLOR_INFO_TABLE_HEADER_BG = COLOR_SCOPE_GREEN_DIM;
+static const uint16_t COLOR_INFO_TABLE_BORDER = COLOR_SCOPE_GREEN_PRIMARY;
 static const int INFO_TEXT_SIZE = 2;
 static const unsigned long REFRESH_INTERVAL_MS = 5000;
 static const unsigned long WIFI_RETRY_INTERVAL_MS = 15000;
@@ -46,9 +50,9 @@ static const uint32_t AUDIO_DRAW_SERVICE_INTERVAL_US = 3500;
 static const uint32_t AUDIO_DRAW_SERVICE_BUDGET_US = 2000;
 static const uint32_t AUDIO_DRAW_MAX_SERVICES_PER_FRAME = 10;
 static const double RADAR_SWEEP_WIDTH_DEG = 5.0;
-static const uint16_t COLOR_RADAR_SWEEP = TFT_DARKGREEN;
-static const uint16_t COLOR_BUTTON_ACTIVE = TFT_GREEN;
-static const uint16_t COLOR_BUTTON_INACTIVE = 0x02A0;
+static const uint16_t COLOR_RADAR_SWEEP = COLOR_SCOPE_GREEN_DIM;
+static const uint16_t COLOR_BUTTON_ACTIVE = COLOR_SCOPE_GREEN_PRIMARY;
+static const uint16_t COLOR_BUTTON_INACTIVE = COLOR_SCOPE_GREEN_DIM;
 static const int INFO_TABLE_ROW_HEIGHT = 28;
 static const int INFO_TABLE_HEADER_HEIGHT = 48;
 static const int INFO_TABLE_PADDING = 8;
