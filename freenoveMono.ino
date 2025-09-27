@@ -666,8 +666,17 @@ void serviceAudioDecoder(uint32_t timeBudgetUs, bool nonBlocking) {
     }
 
     AudioGeneratorMP3 *decoder = mp3;
+    AudioFileSourceICYStream *source = streamFile;
     uint32_t startMicros = micros();
     while (streamPlaying && mp3 == decoder && decoder->isRunning()) {
+      if (source != nullptr) {
+        if (!source->loop()) {
+          Serial.println("[STREAM] Stream source loop returned false.");
+          stopMessage = "Stream error";
+          break;
+        }
+      }
+
       if (!decoder->loop()) {
         Serial.println("[STREAM] Decoder loop returned false.");
         stopMessage = "Stream error";
