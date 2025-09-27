@@ -16,6 +16,7 @@ struct RadarContact;
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioOutputI2S.h>
+#include <esp_system.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -294,6 +295,7 @@ String streamStatusMessage = "Stream stopped";
 AudioGeneratorMP3 *mp3 = nullptr;
 AudioFileSourceICYStream *streamFile = nullptr;
 AudioOutputI2S *audioOutput = nullptr;
+bool audioBackendInitialised = false;
 
 bool amplifierEnabled = false;
 TaskHandle_t radarTaskHandle = nullptr;
@@ -550,6 +552,63 @@ void setAmplifierState(bool enable) {
   }
 }
 
+bool ensureAudioBackend() {
+  if (audioBackendInitialised) {
+    return mp3 != nullptr && audioOutput != nullptr;
+  }
+
+  bool useExternalI2S = I2S_BCLK_PIN >= 0 && I2S_LRCLK_PIN >= 0 && I2S_DOUT_PIN >= 0;
+  AudioOutputI2S *newOutput = nullptr;
+  if (useExternalI2S) {
+    Serial.print("[STREAM] Configuring external I2S pins BCLK=");
+    Serial.print(I2S_BCLK_PIN);
+    Serial.print(", LRCLK=");
+    Serial.print(I2S_LRCLK_PIN);
+    Serial.print(", DOUT=");
+    Serial.println(I2S_DOUT_PIN);
+    newOutput = new AudioOutputI2S();
+  } else {
+    Serial.print("[STREAM] Using internal DAC on GPIO");
+    Serial.println(I2S_DOUT_PIN);
+    newOutput = new AudioOutputI2S(0, 1);
+  }
+
+  if (newOutput == nullptr) {
+    Serial.println("[STREAM] Failed to allocate audio output.");
+    return false;
+  }
+
+  bool pinoutOk = false;
+  if (useExternalI2S) {
+    pinoutOk = newOutput->SetPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
+  } else if (I2S_DOUT_PIN >= 0) {
+    pinoutOk = newOutput->SetPinout(-1, -1, I2S_DOUT_PIN);
+  } else {
+    Serial.println("[STREAM] Invalid DAC pin configuration. Set I2S_DOUT_PIN.");
+  }
+
+  if (!pinoutOk) {
+    Serial.println("[STREAM] Audio pin configuration failed.");
+    delete newOutput;
+    return false;
+  }
+
+  newOutput->SetOutputModeMono(true);
+  newOutput->SetGain(1.0f);
+
+  AudioGeneratorMP3 *newDecoder = new AudioGeneratorMP3();
+  if (newDecoder == nullptr) {
+    Serial.println("[STREAM] Failed to allocate MP3 decoder.");
+    delete newOutput;
+    return false;
+  }
+
+  audioOutput = newOutput;
+  mp3 = newDecoder;
+  audioBackendInitialised = true;
+  return true;
+}
+
 void cleanupStream() {
   {
     ScopedLock audioLock(audioMutex, portMAX_DELAY);
@@ -557,23 +616,14 @@ void cleanupStream() {
       return;
     }
 
-    if (mp3) {
-      if (mp3->isRunning()) {
-        mp3->stop();
-      }
-      delete mp3;
-      mp3 = nullptr;
+    if (mp3 && mp3->isRunning()) {
+      mp3->stop();
     }
 
     if (streamFile) {
       streamFile->close();
       delete streamFile;
       streamFile = nullptr;
-    }
-
-    if (audioOutput) {
-      delete audioOutput;
-      audioOutput = nullptr;
     }
   }
 
@@ -611,19 +661,26 @@ void startStreaming() {
   }
 
   setStreamStatus("Connecting...");
+  if (!ensureAudioBackend()) {
+    setStreamStatus("Audio init failed");
+    drawButtons();
+    return;
+  }
+
   cleanupStream();
 
-  streamFile = new AudioFileSourceICYStream();
-  if (!streamFile) {
+  AudioFileSourceICYStream *newStream = new AudioFileSourceICYStream();
+  if (newStream == nullptr) {
     Serial.println("[STREAM] Failed to allocate stream source.");
     setStreamStatus("No memory");
     drawButtons();
     return;
   }
 
-  if (!streamFile->open(STREAM_URL)) {
+  if (!newStream->open(STREAM_URL)) {
     Serial.println("[STREAM] Failed to open stream URL.");
-    cleanupStream();
+    newStream->close();
+    delete newStream;
     setStreamStatus("Stream failed");
     drawButtons();
     return;
@@ -632,63 +689,54 @@ void startStreaming() {
   Serial.print("[STREAM] Connected to stream: ");
   Serial.println(STREAM_URL);
 
-  bool useExternalI2S = I2S_BCLK_PIN >= 0 && I2S_LRCLK_PIN >= 0 && I2S_DOUT_PIN >= 0;
-  if (useExternalI2S) {
-    Serial.print("[STREAM] Configuring external I2S pins BCLK=");
-    Serial.print(I2S_BCLK_PIN);
-    Serial.print(", LRCLK=");
-    Serial.print(I2S_LRCLK_PIN);
-    Serial.print(", DOUT=");
-    Serial.println(I2S_DOUT_PIN);
-    audioOutput = new AudioOutputI2S();
-  } else {
-    Serial.print("[STREAM] Using internal DAC on GPIO");
-    Serial.println(I2S_DOUT_PIN);
-    audioOutput = new AudioOutputI2S(0, 1);
+  bool decoderStarted = false;
+  const char *errorMessage = nullptr;
+  size_t heapBeforeDecoder = 0;
+  size_t minHeapBeforeDecoder = 0;
+  size_t heapAfterFailure = 0;
+  size_t minHeapAfterFailure = 0;
+
+  {
+    ScopedLock audioLock(audioMutex, portMAX_DELAY);
+    if (!audioLock.isLocked()) {
+      errorMessage = "Audio busy";
+    } else if (mp3 == nullptr || audioOutput == nullptr) {
+      errorMessage = "Audio init failed";
+    } else {
+      streamFile = newStream;
+      newStream = nullptr;
+      setAmplifierState(true);
+      mp3->stop();
+      heapBeforeDecoder = esp_get_free_heap_size();
+      minHeapBeforeDecoder = esp_get_minimum_free_heap_size();
+      Serial.printf("[STREAM] Free heap before decoder start: %u bytes (lowest %u)\n",
+                    (unsigned int)heapBeforeDecoder, (unsigned int)minHeapBeforeDecoder);
+      decoderStarted = mp3->begin(streamFile, audioOutput);
+      if (!decoderStarted) {
+        Serial.println("[STREAM] MP3 decoder failed to start.");
+        heapAfterFailure = esp_get_free_heap_size();
+        minHeapAfterFailure = esp_get_minimum_free_heap_size();
+        Serial.printf("[STREAM] Free heap after decoder failure: %u bytes (lowest %u)\n",
+                      (unsigned int)heapAfterFailure, (unsigned int)minHeapAfterFailure);
+        streamFile->close();
+        delete streamFile;
+        streamFile = nullptr;
+        errorMessage = "Decoder error";
+      }
+    }
   }
 
-  if (!audioOutput) {
-    Serial.println("[STREAM] Failed to allocate audio output.");
-    cleanupStream();
-    setStreamStatus("Audio init failed");
-    drawButtons();
-    return;
+  if (newStream != nullptr) {
+    newStream->close();
+    delete newStream;
   }
 
-  bool pinoutOk = false;
-  if (useExternalI2S) {
-    pinoutOk = audioOutput->SetPinout(I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
-  } else if (I2S_DOUT_PIN >= 0) {
-    pinoutOk = audioOutput->SetPinout(-1, -1, I2S_DOUT_PIN);
-  } else {
-    Serial.println("[STREAM] Invalid DAC pin configuration. Set I2S_DOUT_PIN.");
-  }
-
-  if (!pinoutOk) {
-    Serial.println("[STREAM] Audio pin configuration failed.");
-    cleanupStream();
-    setStreamStatus("Audio pin error");
-    drawButtons();
-    return;
-  }
-
-  audioOutput->SetOutputModeMono(true);
-  audioOutput->SetGain(1.0f);
-  setAmplifierState(true);
-
-  mp3 = new AudioGeneratorMP3();
-  if (!mp3) {
-    Serial.println("[STREAM] Failed to allocate MP3 decoder.");
-    cleanupStream();
-    setStreamStatus("Decoder error");
-    drawButtons();
-    return;
-  }
-
-  if (!mp3->begin(streamFile, audioOutput)) {
-    Serial.println("[STREAM] MP3 decoder failed to start.");
-    cleanupStream();
-    setStreamStatus("Decoder error");
+  if (!decoderStarted) {
+    setAmplifierState(false);
+    if (errorMessage == nullptr) {
+      errorMessage = "Decoder error";
+    }
+    setStreamStatus(String(errorMessage));
     drawButtons();
     return;
   }
