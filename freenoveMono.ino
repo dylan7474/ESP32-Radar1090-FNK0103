@@ -7,8 +7,6 @@
 #include <SPI.h>
 #include <math.h>
 #include <cstring>
-#include <memory>
-#include <new>
 #include <EEPROM.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
@@ -1148,6 +1146,8 @@ struct RadarContact {
 };
 
 RadarContact radarContacts[MAX_RADAR_CONTACTS];
+static RadarContact tempRadarContacts[MAX_RADAR_CONTACTS];
+static RadarContact previousRadarContacts[MAX_RADAR_CONTACTS];
 int radarContactCount = 0;
 
 void resetRadarContacts() {
@@ -1987,21 +1987,7 @@ void fetchAircraft() {
   tempClosestAircraft.track = NAN;
   tempClosestAircraft.minutesToClosest = NAN;
 
-  std::unique_ptr<RadarContact[]> tempContactsBuffer(new (std::nothrow) RadarContact[MAX_RADAR_CONTACTS]);
-  std::unique_ptr<RadarContact[]> previousContactsBuffer(new (std::nothrow) RadarContact[MAX_RADAR_CONTACTS]);
-
-  if (!tempContactsBuffer || !previousContactsBuffer) {
-    Serial.println("[RADAR] Failed to allocate contact buffers.");
-    ScopedRecursiveLock lock(displayMutex);
-    if (lock.isLocked()) {
-      dataConnectionOk = false;
-      resetRadarContacts();
-      updateDisplay();
-    }
-    return;
-  }
-
-  RadarContact *tempContacts = tempContactsBuffer.get();
+  RadarContact *tempContacts = tempRadarContacts;
   int tempContactCount = 0;
   int tempAircraftCount = 0;
   int tempInboundCount = 0;
@@ -2010,7 +1996,7 @@ void fetchAircraft() {
   double alertRangeKm = currentAlertRangeKm();
 
   // Create a snapshot of old data to preserve highlights
-  RadarContact *previousContacts = previousContactsBuffer.get();
+  RadarContact *previousContacts = previousRadarContacts;
   int previousCount;
   int previousActiveIndex;
   String previousActiveFlight; // Use flight name for better tracking
