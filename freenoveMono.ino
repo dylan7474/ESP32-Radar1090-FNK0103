@@ -7,8 +7,6 @@
 #include <SPI.h>
 #include <math.h>
 #include <cstring>
-#include <memory>
-#include <new>
 #include <EEPROM.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
@@ -147,7 +145,7 @@ volatile uint32_t radarFrameSerial = 0;
 volatile uint32_t audioServiceFrameSerial = 0;
 volatile uint32_t audioServicesThisFrame = 0;
 
-static std::unique_ptr<DynamicJsonDocument> aircraftJsonDoc;
+static StaticJsonDocument<16384> aircraftJsonDocument;
 
 int radarRangeIndex = 0;
 int alertRangeIndex = 0;
@@ -1149,9 +1147,8 @@ struct RadarContact {
 
 RadarContact radarContacts[MAX_RADAR_CONTACTS];
 int radarContactCount = 0;
-
-static std::unique_ptr<RadarContact[]> tempContactsBuffer;
-static std::unique_ptr<RadarContact[]> previousContactsBuffer;
+static RadarContact tempRadarContacts[MAX_RADAR_CONTACTS];
+static RadarContact previousRadarContacts[MAX_RADAR_CONTACTS];
 
 void resetRadarContacts() {
   radarContactCount = 0;
@@ -1969,24 +1966,8 @@ void fetchAircraft() {
     return;
   }
 
-  if (!aircraftJsonDoc) {
-    std::unique_ptr<DynamicJsonDocument> newDoc(new (std::nothrow) DynamicJsonDocument(16384));
-    if (!newDoc) {
-      Serial.println("[DATA] Failed to allocate aircraft JSON document buffer.");
-      ScopedRecursiveLock lock(displayMutex);
-      if (lock.isLocked()) {
-        dataConnectionOk = false;
-        resetRadarContacts();
-        updateDisplay();
-      }
-      return;
-    }
-    aircraftJsonDoc = std::move(newDoc);
-  }
-
-  DynamicJsonDocument &doc = *aircraftJsonDoc;
-  doc.clear();
-  DeserializationError err = deserializeJson(doc, http.getStream()); // CPU INTENSIVE - NO LOCK HELD
+  aircraftJsonDocument.clear();
+  DeserializationError err = deserializeJson(aircraftJsonDocument, http.getStream()); // CPU INTENSIVE - NO LOCK HELD
   http.end(); // End session immediately after getting data
 
   if (err) {
@@ -2006,14 +1987,7 @@ void fetchAircraft() {
   tempClosestAircraft.track = NAN;
   tempClosestAircraft.minutesToClosest = NAN;
 
-  if (!tempContactsBuffer) {
-    tempContactsBuffer.reset(new RadarContact[MAX_RADAR_CONTACTS]);
-  }
-  if (!previousContactsBuffer) {
-    previousContactsBuffer.reset(new RadarContact[MAX_RADAR_CONTACTS]);
-  }
-
-  RadarContact *tempContacts = tempContactsBuffer.get();
+  RadarContact *tempContacts = tempRadarContacts;
   int tempContactCount = 0;
   int tempAircraftCount = 0;
   int tempInboundCount = 0;
@@ -2022,7 +1996,7 @@ void fetchAircraft() {
   double alertRangeKm = currentAlertRangeKm();
 
   // Create a snapshot of old data to preserve highlights
-  RadarContact *previousContacts = previousContactsBuffer.get();
+  RadarContact *previousContacts = previousRadarContacts;
   int previousCount;
   int previousActiveIndex;
   String previousActiveFlight; // Use flight name for better tracking
@@ -2042,7 +2016,7 @@ void fetchAircraft() {
   int newActiveIndex = -1;
 
   // Main processing loop on the received JSON data
-  JsonArray arr = doc["aircraft"].as<JsonArray>();
+  JsonArray arr = aircraftJsonDocument["aircraft"].as<JsonArray>();
   for (JsonObject plane : arr) {
     serviceAudioDecoder(); // Yield to let audio buffer fill
     
@@ -2229,7 +2203,7 @@ void fetchAircraft() {
   // Trigger UI update AFTER releasing the lock
   updateDisplay();
 
-  doc.clear();
+  aircraftJsonDocument.clear();
 }
 
 
