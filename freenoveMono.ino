@@ -384,6 +384,25 @@ InfoPanelRenderState infoPanelRenderState = {false,
                                              0,
                                              {}};
 
+void prepareInfoTableRow(InfoTableRow &row) {
+  row.label.reserve(24);
+  row.value.reserve(64);
+  row.label = "";
+  row.value = "";
+}
+
+void prepareInfoPanelStorage() {
+  const size_t cacheCount = sizeof(infoPanelCache.cachedRows) / sizeof(infoPanelCache.cachedRows[0]);
+  for (size_t i = 0; i < cacheCount; ++i) {
+    prepareInfoTableRow(infoPanelCache.cachedRows[i]);
+  }
+
+  const size_t renderCount = sizeof(infoPanelRenderState.rows) / sizeof(infoPanelRenderState.rows[0]);
+  for (size_t i = 0; i < renderCount; ++i) {
+    prepareInfoTableRow(infoPanelRenderState.rows[i]);
+  }
+}
+
 struct CompassLabelBounds {
   const char *label;
   int x;
@@ -1131,6 +1150,7 @@ void setup() {
   prepareAircraftInfo(closestAircraft);
   ensureRadarContactScratchPrepared();
   ensureAircraftScratchPrepared();
+  prepareInfoPanelStorage();
   resetRadarContacts();
   drawStaticLayout();
 
