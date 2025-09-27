@@ -1146,24 +1146,28 @@ struct RadarContact {
 RadarContact radarContacts[MAX_RADAR_CONTACTS];
 int radarContactCount = 0;
 
+void clearRadarContact(RadarContact &contact) {
+  contact.distanceKm = 0.0;
+  contact.bearing = 0.0;
+  contact.displayDistanceKm = 0.0;
+  contact.displayBearing = 0.0;
+  contact.inbound = false;
+  contact.flight = "";
+  contact.altitude = -1;
+  contact.groundSpeed = NAN;
+  contact.track = NAN;
+  contact.displayTrack = NAN;
+  contact.minutesToClosest = NAN;
+  contact.valid = false;
+  contact.lastHighlightTime = 0;
+  contact.stale = false;
+  contact.squawk = "";
+}
+
 void resetRadarContacts() {
   radarContactCount = 0;
   for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
-    radarContacts[i].valid = false;
-    radarContacts[i].flight = "";
-    radarContacts[i].lastHighlightTime = 0;
-    radarContacts[i].inbound = false;
-    radarContacts[i].distanceKm = 0.0;
-    radarContacts[i].bearing = 0.0;
-    radarContacts[i].displayDistanceKm = 0.0;
-    radarContacts[i].displayBearing = 0.0;
-    radarContacts[i].stale = false;
-    radarContacts[i].altitude = -1;
-    radarContacts[i].groundSpeed = NAN;
-    radarContacts[i].track = NAN;
-    radarContacts[i].displayTrack = NAN;
-    radarContacts[i].minutesToClosest = NAN;
-    radarContacts[i].squawk = "";
+    clearRadarContact(radarContacts[i]);
   }
   activeContactIndex = -1;
   markInfoPanelDirty();
@@ -1993,18 +1997,23 @@ void fetchAircraft() {
 
   // Create a snapshot of old data to preserve highlights
   RadarContact previousContacts[MAX_RADAR_CONTACTS];
-  int previousCount;
-  int previousActiveIndex;
+  int previousCount = 0;
+  int previousActiveIndex = -1;
   String previousActiveFlight; // Use flight name for better tracking
   {
     ScopedRecursiveLock lock(displayMutex); // Brief lock to get a safe copy
     if (!lock.isLocked()) return;
-    previousCount = radarContactCount;
+    previousCount = min(radarContactCount, MAX_RADAR_CONTACTS);
     previousActiveIndex = activeContactIndex;
-    if (activeContactIndex >=0 && activeContactIndex < radarContactCount) {
+    if (activeContactIndex >= 0 && activeContactIndex < radarContactCount) {
       previousActiveFlight = radarContacts[activeContactIndex].flight;
     }
-    memcpy(previousContacts, radarContacts, sizeof(radarContacts));
+    for (int i = 0; i < previousCount; ++i) {
+      previousContacts[i] = radarContacts[i];
+    }
+    for (int i = previousCount; i < MAX_RADAR_CONTACTS; ++i) {
+      clearRadarContact(previousContacts[i]);
+    }
   }
   bool previousMatched[MAX_RADAR_CONTACTS] = {false};
   int newActiveIndex = -1;
@@ -2178,17 +2187,22 @@ void fetchAircraft() {
     lastSuccessfulFetch = now;
     
     // Copy temporary data to the global structures
-    memcpy(radarContacts, tempContacts, sizeof(tempContacts));
-    radarContactCount = tempContactCount;
-    
+    radarContactCount = min(tempContactCount, MAX_RADAR_CONTACTS);
+    for (int i = 0; i < radarContactCount; ++i) {
+      radarContacts[i] = tempContacts[i];
+    }
+
     // Invalidate any remaining slots
-    for (int i = tempContactCount; i < MAX_RADAR_CONTACTS; i++) {
-      radarContacts[i].valid = false;
+    for (int i = radarContactCount; i < MAX_RADAR_CONTACTS; ++i) {
+      clearRadarContact(radarContacts[i]);
     }
 
     closestAircraft = tempClosestAircraft;
     aircraftCount = tempAircraftCount;
     inboundAircraftCount = tempInboundCount;
+    if (newActiveIndex < 0 || newActiveIndex >= radarContactCount) {
+      newActiveIndex = -1;
+    }
     activeContactIndex = newActiveIndex;
   }
 
