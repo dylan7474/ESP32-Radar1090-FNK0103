@@ -7,6 +7,8 @@
 #include <SPI.h>
 #include <math.h>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <EEPROM.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
@@ -1146,8 +1148,6 @@ struct RadarContact {
 };
 
 RadarContact radarContacts[MAX_RADAR_CONTACTS];
-static RadarContact tempRadarContacts[MAX_RADAR_CONTACTS];
-static RadarContact previousRadarContacts[MAX_RADAR_CONTACTS];
 int radarContactCount = 0;
 
 void resetRadarContacts() {
@@ -1987,7 +1987,20 @@ void fetchAircraft() {
   tempClosestAircraft.track = NAN;
   tempClosestAircraft.minutesToClosest = NAN;
 
-  RadarContact *tempContacts = tempRadarContacts;
+  std::unique_ptr<RadarContact[]> tempContacts(new (std::nothrow) RadarContact[MAX_RADAR_CONTACTS]);
+  std::unique_ptr<RadarContact[]> previousContacts(new (std::nothrow) RadarContact[MAX_RADAR_CONTACTS]);
+  if (!tempContacts || !previousContacts) {
+    Serial.println("[DATA] Radar contact buffer allocation failed.");
+    ScopedRecursiveLock lock(displayMutex);
+    if (lock.isLocked()) {
+      dataConnectionOk = false;
+      resetRadarContacts();
+      updateDisplay();
+    }
+    return;
+  }
+
+  RadarContact *tempContactsPtr = tempContacts.get();
   int tempContactCount = 0;
   int tempAircraftCount = 0;
   int tempInboundCount = 0;
@@ -1996,7 +2009,7 @@ void fetchAircraft() {
   double alertRangeKm = currentAlertRangeKm();
 
   // Create a snapshot of old data to preserve highlights
-  RadarContact *previousContacts = previousRadarContacts;
+  RadarContact *previousContactsPtr = previousContacts.get();
   int previousCount;
   int previousActiveIndex;
   String previousActiveFlight; // Use flight name for better tracking
@@ -2009,7 +2022,7 @@ void fetchAircraft() {
       previousActiveFlight = radarContacts[activeContactIndex].flight;
     }
     for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
-      previousContacts[i] = radarContacts[i];
+      previousContactsPtr[i] = radarContacts[i];
     }
   }
   bool previousMatched[MAX_RADAR_CONTACTS] = {false};
@@ -2115,7 +2128,7 @@ void fetchAircraft() {
     // ... (Your original contact matching logic can be placed here if needed) ...
 
     if (tempContactCount < MAX_RADAR_CONTACTS) {
-      RadarContact &contact = tempContacts[tempContactCount];
+      RadarContact &contact = tempContactsPtr[tempContactCount];
       contact.valid = true;
       contact.flight = flight;
       contact.squawk = squawk;
@@ -2133,13 +2146,13 @@ void fetchAircraft() {
       contact.lastHighlightTime = 0;
 
       if (matchIndex >= 0) {
-        contact.lastHighlightTime = previousContacts[matchIndex].lastHighlightTime;
-        contact.displayDistanceKm = previousContacts[matchIndex].displayDistanceKm;
-        contact.displayBearing = previousContacts[matchIndex].displayBearing;
-        contact.displayTrack = previousContacts[matchIndex].displayTrack;
+        contact.lastHighlightTime = previousContactsPtr[matchIndex].lastHighlightTime;
+        contact.displayDistanceKm = previousContactsPtr[matchIndex].displayDistanceKm;
+        contact.displayBearing = previousContactsPtr[matchIndex].displayBearing;
+        contact.displayTrack = previousContactsPtr[matchIndex].displayTrack;
         previousMatched[matchIndex] = true;
       }
-      
+
       if (!previousActiveFlight.isEmpty() && flight.length() > 0 && flight.equalsIgnoreCase(previousActiveFlight)) {
         newActiveIndex = tempContactCount;
       }
@@ -2164,11 +2177,11 @@ void fetchAircraft() {
   // Loop to merge stale contacts that are still fading out
   unsigned long now = millis();
   for (int i = 0; i < previousCount && tempContactCount < MAX_RADAR_CONTACTS; ++i) {
-    if (previousMatched[i] || !previousContacts[i].valid) continue;
-    if ((now - previousContacts[i].lastHighlightTime) > RADAR_FADE_DURATION_MS) continue;
-    
-    tempContacts[tempContactCount] = previousContacts[i];
-    tempContacts[tempContactCount].stale = true;
+    if (previousMatched[i] || !previousContactsPtr[i].valid) continue;
+    if ((now - previousContactsPtr[i].lastHighlightTime) > RADAR_FADE_DURATION_MS) continue;
+
+    tempContactsPtr[tempContactCount] = previousContactsPtr[i];
+    tempContactsPtr[tempContactCount].stale = true;
     if (i == previousActiveIndex) {
         newActiveIndex = tempContactCount;
     }
@@ -2185,7 +2198,7 @@ void fetchAircraft() {
     
     // Copy temporary data to the global structures
     for (int i = 0; i < tempContactCount; ++i) {
-      radarContacts[i] = tempContacts[i];
+      radarContacts[i] = tempContactsPtr[i];
     }
     radarContactCount = tempContactCount;
     
