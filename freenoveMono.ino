@@ -1150,6 +1150,9 @@ struct RadarContact {
 RadarContact radarContacts[MAX_RADAR_CONTACTS];
 int radarContactCount = 0;
 
+static std::unique_ptr<RadarContact[]> fetchTempContactsBuffer;
+static std::unique_ptr<RadarContact[]> fetchPreviousContactsBuffer;
+
 void resetRadarContacts() {
   radarContactCount = 0;
   for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
@@ -1652,6 +1655,25 @@ void radarTask(void *param) {
   }
 }
 
+static bool ensureRadarScratchBuffers() {
+  if (!fetchTempContactsBuffer) {
+    fetchTempContactsBuffer.reset(new (std::nothrow) RadarContact[MAX_RADAR_CONTACTS]);
+    if (!fetchTempContactsBuffer) {
+      return false;
+    }
+  }
+
+  if (!fetchPreviousContactsBuffer) {
+    fetchPreviousContactsBuffer.reset(new (std::nothrow) RadarContact[MAX_RADAR_CONTACTS]);
+    if (!fetchPreviousContactsBuffer) {
+      fetchTempContactsBuffer.reset();
+      return false;
+    }
+  }
+
+  return true;
+}
+
 void audioTask(void *param) {
   const TickType_t idleDelay = pdMS_TO_TICKS(10);
   const TickType_t workDelay = pdMS_TO_TICKS(1);
@@ -1987,9 +2009,7 @@ void fetchAircraft() {
   tempClosestAircraft.track = NAN;
   tempClosestAircraft.minutesToClosest = NAN;
 
-  std::unique_ptr<RadarContact[]> tempContacts(new (std::nothrow) RadarContact[MAX_RADAR_CONTACTS]);
-  std::unique_ptr<RadarContact[]> previousContacts(new (std::nothrow) RadarContact[MAX_RADAR_CONTACTS]);
-  if (!tempContacts || !previousContacts) {
+  if (!ensureRadarScratchBuffers()) {
     Serial.println("[DATA] Radar contact buffer allocation failed.");
     ScopedRecursiveLock lock(displayMutex);
     if (lock.isLocked()) {
@@ -2000,7 +2020,7 @@ void fetchAircraft() {
     return;
   }
 
-  RadarContact *tempContactsPtr = tempContacts.get();
+  RadarContact *tempContactsPtr = fetchTempContactsBuffer.get();
   int tempContactCount = 0;
   int tempAircraftCount = 0;
   int tempInboundCount = 0;
@@ -2009,7 +2029,7 @@ void fetchAircraft() {
   double alertRangeKm = currentAlertRangeKm();
 
   // Create a snapshot of old data to preserve highlights
-  RadarContact *previousContactsPtr = previousContacts.get();
+  RadarContact *previousContactsPtr = fetchPreviousContactsBuffer.get();
   int previousCount;
   int previousActiveIndex;
   String previousActiveFlight; // Use flight name for better tracking
