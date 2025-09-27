@@ -8,6 +8,7 @@
 #include <math.h>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <EEPROM.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
@@ -146,7 +147,7 @@ volatile uint32_t radarFrameSerial = 0;
 volatile uint32_t audioServiceFrameSerial = 0;
 volatile uint32_t audioServicesThisFrame = 0;
 
-static StaticJsonDocument<16384> aircraftJsonDoc;
+static std::unique_ptr<DynamicJsonDocument> aircraftJsonDoc;
 
 int radarRangeIndex = 0;
 int alertRangeIndex = 0;
@@ -1968,8 +1969,24 @@ void fetchAircraft() {
     return;
   }
 
-  aircraftJsonDoc.clear();
-  DeserializationError err = deserializeJson(aircraftJsonDoc, http.getStream()); // CPU INTENSIVE - NO LOCK HELD
+  if (!aircraftJsonDoc) {
+    std::unique_ptr<DynamicJsonDocument> newDoc(new (std::nothrow) DynamicJsonDocument(16384));
+    if (!newDoc) {
+      Serial.println("[DATA] Failed to allocate aircraft JSON document buffer.");
+      ScopedRecursiveLock lock(displayMutex);
+      if (lock.isLocked()) {
+        dataConnectionOk = false;
+        resetRadarContacts();
+        updateDisplay();
+      }
+      return;
+    }
+    aircraftJsonDoc = std::move(newDoc);
+  }
+
+  DynamicJsonDocument &doc = *aircraftJsonDoc;
+  doc.clear();
+  DeserializationError err = deserializeJson(doc, http.getStream()); // CPU INTENSIVE - NO LOCK HELD
   http.end(); // End session immediately after getting data
 
   if (err) {
@@ -2025,7 +2042,7 @@ void fetchAircraft() {
   int newActiveIndex = -1;
 
   // Main processing loop on the received JSON data
-  JsonArray arr = aircraftJsonDoc["aircraft"].as<JsonArray>();
+  JsonArray arr = doc["aircraft"].as<JsonArray>();
   for (JsonObject plane : arr) {
     serviceAudioDecoder(); // Yield to let audio buffer fill
     
@@ -2212,7 +2229,7 @@ void fetchAircraft() {
   // Trigger UI update AFTER releasing the lock
   updateDisplay();
 
-  aircraftJsonDoc.clear();
+  doc.clear();
 }
 
 
