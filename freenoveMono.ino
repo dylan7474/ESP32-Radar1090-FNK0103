@@ -8,6 +8,7 @@
 #include <math.h>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <EEPROM.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
@@ -1986,14 +1987,18 @@ void fetchAircraft() {
   tempClosestAircraft.track = NAN;
   tempClosestAircraft.minutesToClosest = NAN;
 
-  static std::unique_ptr<RadarContact[]> tempContactsBuffer;
-  static std::unique_ptr<RadarContact[]> previousContactsBuffer;
+  std::unique_ptr<RadarContact[]> tempContactsBuffer(new (std::nothrow) RadarContact[MAX_RADAR_CONTACTS]);
+  std::unique_ptr<RadarContact[]> previousContactsBuffer(new (std::nothrow) RadarContact[MAX_RADAR_CONTACTS]);
 
-  if (!tempContactsBuffer) {
-    tempContactsBuffer.reset(new RadarContact[MAX_RADAR_CONTACTS]);
-  }
-  if (!previousContactsBuffer) {
-    previousContactsBuffer.reset(new RadarContact[MAX_RADAR_CONTACTS]);
+  if (!tempContactsBuffer || !previousContactsBuffer) {
+    Serial.println("[RADAR] Failed to allocate contact buffers.");
+    ScopedRecursiveLock lock(displayMutex);
+    if (lock.isLocked()) {
+      dataConnectionOk = false;
+      resetRadarContacts();
+      updateDisplay();
+    }
+    return;
   }
 
   RadarContact *tempContacts = tempContactsBuffer.get();
