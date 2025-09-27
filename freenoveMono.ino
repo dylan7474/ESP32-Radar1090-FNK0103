@@ -289,7 +289,7 @@ unsigned long lastTouchTime = 0;
 int activeContactIndex = -1;
 bool infoPanelDirty = true;
 uint32_t infoPanelDirtyGeneration = 0;
-bool streamPlaying = false;
+volatile bool streamPlaying = false;
 String streamStatusMessage = "Stream stopped";
 
 AudioGeneratorMP3 *mp3 = nullptr;
@@ -552,6 +552,23 @@ void setAmplifierState(bool enable) {
   }
 }
 
+bool isDecoderRunning(TickType_t waitTicks = pdMS_TO_TICKS(5)) {
+  if (!streamPlaying || mp3 == nullptr) {
+    return false;
+  }
+
+  if (audioMutex == nullptr) {
+    return mp3->isRunning();
+  }
+
+  ScopedLock audioLock(audioMutex, waitTicks);
+  if (!audioLock.isLocked()) {
+    return false;
+  }
+
+  return mp3 != nullptr && mp3->isRunning();
+}
+
 bool ensureAudioBackend() {
   if (audioBackendInitialised) {
     return mp3 != nullptr && audioOutput != nullptr;
@@ -703,25 +720,24 @@ void startStreaming() {
     } else if (mp3 == nullptr || audioOutput == nullptr) {
       errorMessage = "Audio init failed";
     } else {
-      streamFile = newStream;
-      newStream = nullptr;
       setAmplifierState(true);
       mp3->stop();
       heapBeforeDecoder = esp_get_free_heap_size();
       minHeapBeforeDecoder = esp_get_minimum_free_heap_size();
       Serial.printf("[STREAM] Free heap before decoder start: %u bytes (lowest %u)\n",
                     (unsigned int)heapBeforeDecoder, (unsigned int)minHeapBeforeDecoder);
-      decoderStarted = mp3->begin(streamFile, audioOutput);
+      decoderStarted = mp3->begin(newStream, audioOutput);
       if (!decoderStarted) {
         Serial.println("[STREAM] MP3 decoder failed to start.");
+        mp3->stop();
         heapAfterFailure = esp_get_free_heap_size();
         minHeapAfterFailure = esp_get_minimum_free_heap_size();
         Serial.printf("[STREAM] Free heap after decoder failure: %u bytes (lowest %u)\n",
                       (unsigned int)heapAfterFailure, (unsigned int)minHeapAfterFailure);
-        streamFile->close();
-        delete streamFile;
-        streamFile = nullptr;
         errorMessage = "Decoder error";
+      } else {
+        streamFile = newStream;
+        newStream = nullptr;
       }
     }
   }
@@ -800,7 +816,7 @@ void serviceAudioDecoder(uint32_t timeBudgetUs, bool nonBlocking) {
 }
 
 void serviceAudioDuringRadarDraw() {
-  if (!streamPlaying || !mp3 || !mp3->isRunning()) {
+  if (!streamPlaying || !isDecoderRunning(0)) {
     return;
   }
 
@@ -1200,7 +1216,7 @@ void loop() {
   }
 
   if (streamPlaying && mp3) {
-    bool decoderRunningBefore = mp3->isRunning();
+    bool decoderRunningBefore = isDecoderRunning();
     if (decoderRunningBefore) {
       if (audioTaskHandle != nullptr) {
         serviceAudioDecoder(AUDIO_SERVICE_TIME_SLICE_US / 2, true);
@@ -1209,7 +1225,8 @@ void loop() {
       }
     }
 
-    if (streamPlaying && mp3 && !mp3->isRunning()) {
+    bool decoderStillRunning = isDecoderRunning();
+    if (streamPlaying && mp3 && !decoderStillRunning) {
       if (decoderRunningBefore) {
         Serial.println("[STREAM] Decoder reported stopped.");
       }
@@ -1889,7 +1906,7 @@ void audioTask(void *param) {
       continue;
     }
 
-    if (!mp3->isRunning()) {
+    if (!isDecoderRunning(pdMS_TO_TICKS(20))) {
       ulTaskNotifyTake(pdTRUE, idleDelay);
       continue;
     }
