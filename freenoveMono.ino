@@ -155,7 +155,26 @@ struct RadarContact {
   String squawk;
 };
 
+struct RadarContactSnapshot {
+  double distanceKm;
+  double bearing;
+  double displayDistanceKm;
+  double displayBearing;
+  double groundSpeed;
+  double track;
+  double displayTrack;
+  double minutesToClosest;
+  int altitude;
+  bool inbound;
+  bool valid;
+  unsigned long lastHighlightTime;
+  bool stale;
+  char flight[17];
+  char squawk[9];
+};
+
 void clearRadarContact(RadarContact &contact);
+void clearRadarContactSnapshot(RadarContactSnapshot &snapshot);
 
 void clearAircraftInfo(AircraftInfo &info) {
   info.flight = "";
@@ -1194,7 +1213,7 @@ void loop() {
 
 RadarContact radarContacts[MAX_RADAR_CONTACTS];
 RadarContact radarContactScratch[MAX_RADAR_CONTACTS];
-RadarContact previousContactScratch[MAX_RADAR_CONTACTS];
+RadarContactSnapshot previousContactSnapshots[MAX_RADAR_CONTACTS];
 String previousActiveFlightBuffer;
 int radarContactCount = 0;
 bool radarContactsInitialised = false;
@@ -1211,8 +1230,10 @@ void ensureRadarContactsPrepared() {
 void ensureRadarContactScratchPrepared() {
   if (!radarContactScratchInitialised) {
     prepareRadarContactArray(radarContactScratch, MAX_RADAR_CONTACTS);
-    prepareRadarContactArray(previousContactScratch, MAX_RADAR_CONTACTS);
     previousActiveFlightBuffer.reserve(16);
+    for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
+      clearRadarContactSnapshot(previousContactSnapshots[i]);
+    }
     radarContactScratchInitialised = true;
   }
 }
@@ -1242,6 +1263,67 @@ void clearRadarContact(RadarContact &contact) {
   contact.squawk = "";
 }
 
+void clearRadarContactSnapshot(RadarContactSnapshot &snapshot) {
+  snapshot.distanceKm = 0.0;
+  snapshot.bearing = 0.0;
+  snapshot.displayDistanceKm = 0.0;
+  snapshot.displayBearing = 0.0;
+  snapshot.groundSpeed = NAN;
+  snapshot.track = NAN;
+  snapshot.displayTrack = NAN;
+  snapshot.minutesToClosest = NAN;
+  snapshot.altitude = -1;
+  snapshot.inbound = false;
+  snapshot.valid = false;
+  snapshot.lastHighlightTime = 0;
+  snapshot.stale = false;
+  snapshot.flight[0] = '\0';
+  snapshot.squawk[0] = '\0';
+}
+
+void snapshotFromRadarContact(RadarContactSnapshot &snapshot, const RadarContact &contact) {
+  snapshot.distanceKm = contact.distanceKm;
+  snapshot.bearing = contact.bearing;
+  snapshot.displayDistanceKm = contact.displayDistanceKm;
+  snapshot.displayBearing = contact.displayBearing;
+  snapshot.groundSpeed = contact.groundSpeed;
+  snapshot.track = contact.track;
+  snapshot.displayTrack = contact.displayTrack;
+  snapshot.minutesToClosest = contact.minutesToClosest;
+  snapshot.altitude = contact.altitude;
+  snapshot.inbound = contact.inbound;
+  snapshot.valid = contact.valid;
+  snapshot.lastHighlightTime = contact.lastHighlightTime;
+  snapshot.stale = contact.stale;
+  snapshot.flight[0] = '\0';
+  snapshot.squawk[0] = '\0';
+  if (contact.flight.length() > 0) {
+    contact.flight.toCharArray(snapshot.flight, sizeof(snapshot.flight));
+  }
+  if (contact.squawk.length() > 0) {
+    contact.squawk.toCharArray(snapshot.squawk, sizeof(snapshot.squawk));
+  }
+}
+
+void applySnapshotToRadarContact(RadarContact &dest, const RadarContactSnapshot &snapshot) {
+  clearRadarContact(dest);
+  dest.distanceKm = snapshot.distanceKm;
+  dest.bearing = snapshot.bearing;
+  dest.displayDistanceKm = snapshot.displayDistanceKm;
+  dest.displayBearing = snapshot.displayBearing;
+  dest.groundSpeed = snapshot.groundSpeed;
+  dest.track = snapshot.track;
+  dest.displayTrack = snapshot.displayTrack;
+  dest.minutesToClosest = snapshot.minutesToClosest;
+  dest.altitude = snapshot.altitude;
+  dest.inbound = snapshot.inbound;
+  dest.valid = snapshot.valid;
+  dest.lastHighlightTime = snapshot.lastHighlightTime;
+  dest.stale = snapshot.stale;
+  dest.flight = snapshot.flight;
+  dest.squawk = snapshot.squawk;
+}
+
 void copyRadarContact(RadarContact &dest, const RadarContact &src) {
   dest.distanceKm = src.distanceKm;
   dest.bearing = src.bearing;
@@ -1265,6 +1347,7 @@ void resetRadarContacts() {
   radarContactCount = 0;
   for (int i = 0; i < MAX_RADAR_CONTACTS; ++i) {
     clearRadarContact(radarContacts[i]);
+    clearRadarContactSnapshot(previousContactSnapshots[i]);
   }
   activeContactIndex = -1;
   markInfoPanelDirty();
@@ -2092,7 +2175,7 @@ void fetchAircraft() {
   double alertRangeKm = currentAlertRangeKm();
 
   // Create a snapshot of old data to preserve highlights
-  RadarContact *previousContacts = previousContactScratch;
+  RadarContactSnapshot *previousContacts = previousContactSnapshots;
   int previousCount = 0;
   int previousActiveIndex = -1;
   String &previousActiveFlight = previousActiveFlightBuffer; // Use flight name for better tracking
@@ -2108,10 +2191,10 @@ void fetchAircraft() {
       previousActiveFlight = "";
     }
     for (int i = 0; i < previousCount; ++i) {
-      copyRadarContact(previousContacts[i], radarContacts[i]);
+      snapshotFromRadarContact(previousContacts[i], radarContacts[i]);
     }
     for (int i = previousCount; i < MAX_RADAR_CONTACTS; ++i) {
-      clearRadarContact(previousContacts[i]);
+      clearRadarContactSnapshot(previousContacts[i]);
     }
   }
   bool previousMatched[MAX_RADAR_CONTACTS] = {false};
@@ -2219,7 +2302,7 @@ void fetchAircraft() {
         if (!previousContacts[i].valid || previousMatched[i]) {
           continue;
         }
-        if (previousContacts[i].flight.equalsIgnoreCase(flight)) {
+        if (flight.equalsIgnoreCase(previousContacts[i].flight)) {
           matchIndex = i;
           break;
         }
@@ -2266,7 +2349,7 @@ void fetchAircraft() {
         contact.displayTrack = previousContacts[matchIndex].displayTrack;
         previousMatched[matchIndex] = true;
       }
-      
+
       if (!previousActiveFlight.isEmpty() && flight.length() > 0 && flight.equalsIgnoreCase(previousActiveFlight)) {
         newActiveIndex = tempContactCount;
       }
@@ -2294,7 +2377,7 @@ void fetchAircraft() {
     if (previousMatched[i] || !previousContacts[i].valid) continue;
     if ((now - previousContacts[i].lastHighlightTime) > RADAR_FADE_DURATION_MS) continue;
 
-    copyRadarContact(tempContacts[tempContactCount], previousContacts[i]);
+    applySnapshotToRadarContact(tempContacts[tempContactCount], previousContacts[i]);
     tempContacts[tempContactCount].stale = true;
     if (i == previousActiveIndex) {
         newActiveIndex = tempContactCount;
