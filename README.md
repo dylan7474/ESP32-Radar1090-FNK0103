@@ -6,6 +6,7 @@ An Arduino-compatible sketch for the Freenove ESP32 4.0" display board (FNK0103)
 
 - **Animated radar scope** with fading contacts, compass markings, WiFi signal indicator and configurable orientation.
 - **Inbound traffic detection** that flags aircraft inside a configurable alert ring or on a converging track, surfacing ETA when available.
+- **Vehicle-specific radar glyphs** that pick drone, rotorcraft, glider, lighter-than-air or weight-class icons automatically from dump1090 metadata.
 - **Detail panel** that caches and redraws only the rows that change, showing callsign, speed, distance, altitude, squawk and traffic counts.
 - **Touch controls** to cycle radar range, adjust the alert radius, rotate the radar orientation and select contacts, with settings persisted to EEPROM.
 - **Dump1090 integration** via `aircraft.json`, including smoothing so recently seen targets fade out rather than disappearing abruptly.

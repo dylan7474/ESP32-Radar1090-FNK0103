@@ -16,7 +16,8 @@
 #include "freertos/semphr.h"
 
 #include "config.h"
-#include "plane_icon.h"
+#include "aircraft_icons.h"
+#include "aircraft_icon_utils.h"
 
 // --- Display & Timing Constants ---
 // This variant applies a monochrome green palette to mimic a traditional radar scope.
@@ -773,7 +774,8 @@ uint16_t applyAircraftIconIntensity(uint16_t baseColor, uint8_t intensity) {
 }
 
 template <typename GFX>
-void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, float size, uint16_t color) {
+void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, float size, uint16_t color,
+                      AircraftIconId iconId) {
   if (size <= 0.0f || isnan(headingDeg)) {
     return;
   }
@@ -786,27 +788,33 @@ void drawAircraftIcon(GFX &gfx, int centerX, int centerY, double headingDeg, flo
   double sinHeading = sin(headingRad);
   double cosHeading = cos(headingRad);
 
-  float scale = (2.0f * size) / max(PLANE_ICON_HEIGHT - 1, 1);
+  const AircraftIcon &icon = aircraftIconForId(iconId);
+  int iconWidth = icon.width;
+  int iconHeight = icon.height;
+  const uint8_t *alphaData = icon.alpha;
+  const uint8_t *intensityData = icon.intensity;
+
+  float scale = (2.0f * size) / max(iconHeight - 1, 1);
   if (scale <= 0.0f || isnan(scale)) {
     return;
   }
 
-  float halfWidth = (PLANE_ICON_WIDTH - 1) * 0.5f;
-  float halfHeight = (PLANE_ICON_HEIGHT - 1) * 0.5f;
+  float halfWidth = (iconWidth - 1) * 0.5f;
+  float halfHeight = (iconHeight - 1) * 0.5f;
 
-  for (int y = 0; y < PLANE_ICON_HEIGHT; ++y) {
+  for (int y = 0; y < iconHeight; ++y) {
     serviceAudioDuringRadarDraw();
-    for (int x = 0; x < PLANE_ICON_WIDTH; ++x) {
+    for (int x = 0; x < iconWidth; ++x) {
       if ((x & 0x07) == 0) {
         serviceAudioDuringRadarDraw();
       }
-      int index = y * PLANE_ICON_WIDTH + x;
-      uint8_t alpha = pgm_read_byte(&PLANE_ICON_ALPHA[index]);
+      int index = y * iconWidth + x;
+      uint8_t alpha = pgm_read_byte(&alphaData[index]);
       if (alpha < 16) {
         continue;
       }
 
-      uint8_t intensity = pgm_read_byte(&PLANE_ICON_INTENSITY[index]);
+      uint8_t intensity = pgm_read_byte(&intensityData[index]);
       uint8_t effectiveIntensity = (uint8_t)((intensity * alpha + 127) / 255);
       if (effectiveIntensity == 0) {
         continue;
@@ -1141,6 +1149,7 @@ struct RadarContact {
   unsigned long lastHighlightTime;
   bool stale;
   String squawk;
+  AircraftIconId iconId;
 };
 
 RadarContact radarContacts[MAX_RADAR_CONTACTS];
@@ -1164,6 +1173,7 @@ void resetRadarContacts() {
     radarContacts[i].displayTrack = NAN;
     radarContacts[i].minutesToClosest = NAN;
     radarContacts[i].squawk = "";
+    radarContacts[i].iconId = AIRCRAFT_ICON_MEDIUM;
   }
   activeContactIndex = -1;
   markInfoPanelDirty();
@@ -1779,7 +1789,7 @@ void renderRadarFrame(bool pushToDisplay) {
         headingDeg = radarContacts[i].displayBearing;
       }
       drawAircraftIcon(radarSprite, contactX, contactY, headingDeg + rotationOffsetDeg,
-                       AIRCRAFT_ICON_SIZE, fadedColor);
+                       AIRCRAFT_ICON_SIZE, fadedColor, radarContacts[i].iconId);
     }
 
     serviceAudioDuringRadarDraw();
@@ -1873,7 +1883,7 @@ void renderRadarFrame(bool pushToDisplay) {
         headingDeg = radarContacts[i].displayBearing;
       }
       drawAircraftIcon(tft, contactX, contactY, headingDeg + rotationOffsetDeg, AIRCRAFT_ICON_SIZE,
-                       fadedColor);
+                       fadedColor, radarContacts[i].iconId);
     }
 
     serviceAudioDuringRadarDraw();
@@ -2125,6 +2135,7 @@ void fetchAircraft() {
       contact.minutesToClosest = minutesToClosest;
       contact.stale = false;
       contact.lastHighlightTime = 0;
+      contact.iconId = determineAircraftIcon(plane);
 
       if (matchIndex >= 0) {
         contact.lastHighlightTime = previousContacts[matchIndex].lastHighlightTime;
