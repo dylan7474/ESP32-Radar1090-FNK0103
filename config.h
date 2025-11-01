@@ -10,11 +10,10 @@
 #define USER_LON -1.0
 
 // -- Radar & Server Settings --
-#define DUMP1090_SERVER "192.168.50.100" // IP or hostname of dump1090 server
-#define DUMP1090_PORT 8080               // The default web port for dump1090 is often 8080
+#define AIRCRAFT_DATA_URL "http://dump1090.dylanjones.org/data/aircraft.json" // Full URL to the dump1090 aircraft.json feed
 
 // Icecast audio stream configuration
-#define STREAM_URL "http://radio.dylanjones.org:8000/Audacity"
+#define STREAM_URL "http://audio.dylanjones.org/stream"
 
 // Audio output configuration
 // The FNK0103 board uses the onboard amplifier driven from the ESP32's

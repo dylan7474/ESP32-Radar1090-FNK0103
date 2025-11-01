@@ -1931,10 +1931,8 @@ void fetchAircraft() {
   }
 
   HTTPClient http;
-  char url[160];
-  snprintf(url, sizeof(url), "http://%s:%d/dump1090-fa/data/aircraft.json", DUMP1090_SERVER, DUMP1090_PORT);
 
-  if (!http.begin(url)) {
+  if (!http.begin(AIRCRAFT_DATA_URL)) {
     ScopedRecursiveLock lock(displayMutex);
     if (!lock.isLocked()) return;
     dataConnectionOk = false;
