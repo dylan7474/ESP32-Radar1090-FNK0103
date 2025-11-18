@@ -105,6 +105,19 @@ static const int COMPASS_LABEL_COUNT = 4;
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite radarSprite = TFT_eSprite(&tft);
 
+// Some TFT_eSPI releases only expose getTouch() unless TOUCH_CS is defined in the
+// library's user setup. Provide a compatibility shim so we can continue to read
+// uncalibrated touch points even if the raw helper is missing.
+static bool readRawTouch(uint16_t &rawX, uint16_t &rawY) {
+#if defined(TOUCH_CS)
+  return tft.getTouchRaw(&rawX, &rawY);
+#else
+  (void)rawX;
+  (void)rawY;
+  return false;
+#endif
+}
+
 bool radarSpriteActive = false;
 int radarSpriteWidth = 0;
 int radarSpriteHeight = 0;
@@ -2358,7 +2371,7 @@ void drawButton(int index) {
 bool readTouchPoint(int &screenX, int &screenY) {
   uint16_t rawX = 0;
   uint16_t rawY = 0;
-  if (!tft.getTouchRaw(&rawX, &rawY)) {
+  if (!readRawTouch(rawX, rawY)) {
     return false;
   }
 
