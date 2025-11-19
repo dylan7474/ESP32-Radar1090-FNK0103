@@ -4,3 +4,6 @@ https://docs.freenove.com/projects/fnk0103/en/latest/
 
 Compile with:
 arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir release/ESP32-Radar1090-FNK0103 ESP32-Radar1090-FNK0103/ESP32-Radar1090-FNK0103.ino
+
+What was missing
+arduino-cli core install esp32:esp32
