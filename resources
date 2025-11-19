@@ -8,3 +8,4 @@ arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir release/ESP32-Radar109
 What was missing
 arduino-cli config set network.connection_timeout 600s
 arduino-cli core install esp32:esp32
+arduino-cli lib install "ArduinoJson"
