@@ -6,4 +6,5 @@ Compile with:
 arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir release/ESP32-Radar1090-FNK0103 ESP32-Radar1090-FNK0103/ESP32-Radar1090-FNK0103.ino
 
 What was missing
+arduino-cli config set network.connection_timeout 600s
 arduino-cli core install esp32:esp32
