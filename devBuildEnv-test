@@ -52,6 +52,7 @@ arduino-cli config init --overwrite
 
 # Enable ZIP installation (unsafe install)
 arduino-cli config set library.enable_unsafe_install true
+arduino-cli config set network.connection_timeout 600s
 
 # Boards index + proxy
 arduino-cli config set board_manager.additional_urls \
