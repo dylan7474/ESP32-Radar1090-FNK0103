@@ -10,3 +10,5 @@ arduino-cli config set network.connection_timeout 600s
 arduino-cli core install esp32:esp32
 arduino-cli lib install "ArduinoJson"
 arduino-cli lib install "TFT_eSPI"
+arduino-cli lib install "ESP8266Audio"
+arduino-cli lib install "lvgl"
