@@ -34,7 +34,7 @@ Remember to edit the libraries/TFT_eSPI/User_Setup_Select.h as below
 The sketch targets the Freenove FNK0103 kit where the ESP32, TFT backplane and touch buttons share a common PCB. No external wiring is required beyond providing power and ensuring the TFT_eSPI library is configured for the panel that ships with the kit. If you adapt the sketch to another ESP32 + TFT combination, update the TFT_eSPI pin definitions accordingly.
 
 ## Setup
-1. Update `config.h` with your WiFi credentials, dump1090 server address and your latitude/longitude.
+1. Update `config.h` with your WiFi credentials, your latitude/longitude, and customise the aircraft data/audio stream URLs if needed.
 2. Ensure the libraries above are installed in the Arduino IDE and that TFT_eSPI is configured for the Freenove display.
 3. Open `freenove.ino` in the Arduino IDE, select your ESP32 board and the correct port.
 4. Compile and upload.
@@ -44,7 +44,7 @@ The sketch targets the Freenove FNK0103 kit where the ESP32, TFT backplane and t
 - Tap the **Radar** button to cycle the display range (5 km → 300 km). Tap the **Alert** button to change the inbound alert radius (1 km → 10 km).
 - Tapping inside the radar face rotates the compass orientation in 90° steps—handy if you want north-up, track-up or any of the four quadrants.
 - Connection, WiFi strength, fetch timing and inbound counts are summarised near the bottom of the display.
-- Aircraft distance, bearing, altitude, track and estimated arrival (for inbound flights) refresh every five seconds while the ESP32 maintains a WiFi link to the dump1090 server. The aircraft fetcher runs on its own FreeRTOS task, so network latency never stalls the UI or the audio stream. Alert/range selections and orientation are saved to EEPROM so they persist across reboots.
+- Aircraft distance, bearing, altitude, track and estimated arrival (for inbound flights) refresh every five seconds while the ESP32 maintains a WiFi link to the aircraft data feed. The aircraft fetcher runs on its own FreeRTOS task, so network latency never stalls the UI or the audio stream. Alert/range selections and orientation are saved to EEPROM so they persist across reboots.
 
 ### Task Architecture
 
